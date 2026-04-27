@@ -1,46 +1,63 @@
-use crate::fs::FileSystem;
+use crate::ssh::connection::SshHandle;
 use crate::FileInfo;
-use ssh2::Session;
-use std::io::{Read, Write};
+use russh_sftp::client::SftpSession;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
-pub struct SftpFs {
-    session: Session,
-}
+pub struct SftpFs;
 
 impl SftpFs {
-    pub fn new(session: Session) -> Self {
-        Self { session }
+    async fn create_sftp(handle: &SshHandle) -> Result<SftpSession, String> {
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("Open channel: {}", e))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| format!("Request SFTP subsystem: {}", e))?;
+        SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| format!("SFTP init: {}", e))
     }
 
-    fn sftp(&self) -> Result<ssh2::Sftp, String> {
-        self.session
-            .sftp()
-            .map_err(|e| format!("SFTP channel error: {}", e))
+    fn format_permissions(perm: &russh_sftp::protocol::FilePermissions) -> String {
+        let mut s = String::with_capacity(9);
+        s.push(if perm.owner_read { 'r' } else { '-' });
+        s.push(if perm.owner_write { 'w' } else { '-' });
+        s.push(if perm.owner_exec { 'x' } else { '-' });
+        s.push(if perm.group_read { 'r' } else { '-' });
+        s.push(if perm.group_write { 'w' } else { '-' });
+        s.push(if perm.group_exec { 'x' } else { '-' });
+        s.push(if perm.other_read { 'r' } else { '-' });
+        s.push(if perm.other_write { 'w' } else { '-' });
+        s.push(if perm.other_exec { 'x' } else { '-' });
+        s
     }
-}
 
-impl FileSystem for SftpFs {
-    fn read_dir(&self, path: &Path) -> Result<Vec<FileInfo>, String> {
-        let sftp = self.sftp()?;
-        let dir = sftp
-            .readdir(path)
-            .map_err(|e| format!("SFTP readdir {}: {}", path.display(), e))?;
+    pub async fn read_dir(
+        handle: &SshHandle,
+        path: &Path,
+    ) -> Result<Vec<FileInfo>, String> {
+        let sftp = Self::create_sftp(handle).await?;
+        let read_dir = sftp
+            .read_dir(path.to_string_lossy().to_string())
+            .await
+            .map_err(|e| format!("SFTP read_dir {}: {}", path.display(), e))?;
 
         let mut files: Vec<FileInfo> = Vec::new();
 
-        for (entry_path, stat) in &dir {
-            let name = entry_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+        for entry in read_dir {
+            let name = entry.file_name();
             if name.is_empty() || name == "." {
                 continue;
             }
 
-            let is_dir = stat.is_dir();
-            let is_symlink = stat.file_type() == ssh2::FileType::Symlink;
-            let size = if is_dir { 0 } else { stat.size.unwrap_or(0) };
+            let metadata = entry.metadata();
+            let is_dir = metadata.is_dir();
+            let is_symlink = metadata.is_symlink();
+            let size = if is_dir { 0 } else { metadata.len() };
             let is_hidden = name.starts_with('.');
 
             let extension = if is_dir {
@@ -52,12 +69,15 @@ impl FileSystem for SftpFs {
                     .unwrap_or_default()
             };
 
-            let modified = stat.mtime.map(|t| {
-                let dt = chrono::DateTime::from_timestamp(t as i64, 0)
+            let modified = metadata.modified().ok().map(|t| {
+                let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let dt = chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
                     .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
                 let local_dt: chrono::DateTime<chrono::Local> = dt.into();
                 local_dt.format("%Y-%m-%d %H:%M").to_string()
             });
+
+            let permissions = Self::format_permissions(&metadata.permissions());
 
             files.push(FileInfo {
                 name,
@@ -67,6 +87,7 @@ impl FileSystem for SftpFs {
                 extension,
                 is_hidden,
                 is_symlink,
+                permissions,
             });
         }
 
@@ -86,193 +107,131 @@ impl FileSystem for SftpFs {
                 extension: String::new(),
                 is_hidden: false,
                 is_symlink: false,
+                permissions: String::new(),
             },
         );
 
         Ok(files)
     }
 
-    fn copy_items(&self, sources: &[PathBuf], dest: &Path) -> Result<(), String> {
-        let sftp = self.sftp()?;
-        for src in sources {
-            let file_name = src
-                .file_name()
-                .ok_or_else(|| format!("Invalid path: {}", src.display()))?;
-            let dest_item = dest.join(file_name);
-
-            let stat = sftp
-                .stat(src)
-                .map_err(|e| format!("Stat {}: {}", src.display(), e))?;
-
-            if stat.is_dir() {
-                self.copy_dir_recursive_sftp(&sftp, src, &dest_item)?;
-            } else {
-                self.copy_file_sftp(&sftp, src, &dest_item)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn move_items(&self, sources: &[PathBuf], dest: &Path) -> Result<(), String> {
-        let sftp = self.sftp()?;
-        for src in sources {
-            let file_name = src
-                .file_name()
-                .ok_or_else(|| format!("Invalid path: {}", src.display()))?;
-            let dest_item = dest.join(file_name);
-
-            // Try rename first
-            if sftp.rename(src, &dest_item, Some(ssh2::RenameFlags::OVERWRITE)).is_err() {
-                // Fall back to copy + delete
-                let stat = sftp
-                    .stat(src)
-                    .map_err(|e| format!("Stat {}: {}", src.display(), e))?;
-                if stat.is_dir() {
-                    self.copy_dir_recursive_sftp(&sftp, src, &dest_item)?;
-                } else {
-                    self.copy_file_sftp(&sftp, src, &dest_item)?;
-                }
-                self.delete_items(&[src.clone()])?;
-            }
-        }
-        Ok(())
-    }
-
-    fn delete_items(&self, paths: &[PathBuf]) -> Result<(), String> {
-        let sftp = self.sftp()?;
+    pub async fn delete_items(
+        handle: &SshHandle,
+        paths: &[PathBuf],
+    ) -> Result<(), String> {
+        let sftp = Self::create_sftp(handle).await?;
         for path in paths {
-            let stat = sftp
-                .stat(path)
+            let path_str = path.to_string_lossy().to_string();
+            let metadata = sftp
+                .metadata(&path_str)
+                .await
                 .map_err(|e| format!("Stat {}: {}", path.display(), e))?;
-            if stat.is_dir() {
-                self.remove_dir_recursive_sftp(&sftp, path)?;
+            if metadata.is_dir() {
+                remove_dir_recursive(&sftp, &path_str).await?;
             } else {
-                sftp.unlink(path)
+                sftp.remove_file(&path_str)
+                    .await
                     .map_err(|e| format!("Delete {}: {}", path.display(), e))?;
             }
         }
         Ok(())
     }
 
-    fn rename_item(&self, path: &Path, new_name: &str) -> Result<(), String> {
-        let sftp = self.sftp()?;
+    pub async fn rename_item(
+        handle: &SshHandle,
+        path: &Path,
+        new_name: &str,
+    ) -> Result<(), String> {
+        let sftp = Self::create_sftp(handle).await?;
         let parent = path
             .parent()
             .ok_or_else(|| format!("Cannot get parent of: {}", path.display()))?;
         let new_path = parent.join(new_name);
-        sftp.rename(path, &new_path, Some(ssh2::RenameFlags::OVERWRITE))
+        sftp.rename(path.to_string_lossy().to_string(), new_path.to_string_lossy().to_string())
+            .await
             .map_err(|e| format!("Rename failed: {}", e))
     }
 
-    fn create_dir(&self, path: &Path, name: &str) -> Result<(), String> {
-        let sftp = self.sftp()?;
+    pub async fn create_dir(
+        handle: &SshHandle,
+        path: &Path,
+        name: &str,
+    ) -> Result<(), String> {
+        let sftp = Self::create_sftp(handle).await?;
         let dir_path = path.join(name);
-        sftp.mkdir(&dir_path, 0o755)
+        sftp.create_dir(dir_path.to_string_lossy().to_string())
+            .await
             .map_err(|e| format!("Create dir failed: {}", e))
     }
 
-    fn path_exists(&self, path: &Path) -> Result<bool, String> {
-        let sftp = self.sftp()?;
-        Ok(sftp.stat(path).is_ok())
+    pub async fn path_exists(
+        handle: &SshHandle,
+        path: &Path,
+    ) -> Result<bool, String> {
+        let sftp = Self::create_sftp(handle).await?;
+        sftp.try_exists(path.to_string_lossy().to_string())
+            .await
+            .map_err(|e| format!("Exists check: {}", e))
     }
 
-    fn read_file_text(&self, path: &Path) -> Result<String, String> {
-        let sftp = self.sftp()?;
+    pub async fn read_file_text(
+        handle: &SshHandle,
+        path: &Path,
+    ) -> Result<String, String> {
+        let sftp = Self::create_sftp(handle).await?;
+        let path_str = path.to_string_lossy().to_string();
 
-        let stat = sftp
-            .stat(path)
+        let metadata = sftp
+            .metadata(&path_str)
+            .await
             .map_err(|e| format!("Stat error: {}", e))?;
-        let size = stat.size.unwrap_or(0);
+        let size = metadata.len();
         if size > 2 * 1024 * 1024 {
             return Err(format!("File too large ({} bytes, max 2 MB)", size));
         }
 
-        let mut remote_file = sftp
-            .open(path)
-            .map_err(|e| format!("Open {}: {}", path.display(), e))?;
-        let mut content = String::new();
-        remote_file
-            .read_to_string(&mut content)
+        let content = sftp
+            .read(&path_str)
+            .await
             .map_err(|e| format!("Read {}: {}", path.display(), e))?;
-        Ok(content)
+        String::from_utf8(content)
+            .map_err(|e| format!("UTF-8 decode: {}", e))
     }
 }
 
-impl SftpFs {
-    fn copy_file_sftp(&self, sftp: &ssh2::Sftp, src: &Path, dest: &Path) -> Result<(), String> {
-        let mut remote_file = sftp
-            .open(src)
-            .map_err(|e| format!("Open {}: {}", src.display(), e))?;
-        let mut content = Vec::new();
-        remote_file
-            .read_to_end(&mut content)
-            .map_err(|e| format!("Read {}: {}", src.display(), e))?;
+fn remove_dir_recursive<'a>(
+    sftp: &'a SftpSession,
+    path: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+    let read_dir = sftp
+        .read_dir(path.to_string())
+        .await
+        .map_err(|e| format!("Readdir {}: {}", path, e))?;
 
-        let mut dest_file = sftp
-            .create(dest)
-            .map_err(|e| format!("Create {}: {}", dest.display(), e))?;
-        dest_file
-            .write_all(&content)
-            .map_err(|e| format!("Write {}: {}", dest.display(), e))?;
-        Ok(())
-    }
-
-    fn copy_dir_recursive_sftp(
-        &self,
-        sftp: &ssh2::Sftp,
-        src: &Path,
-        dest: &Path,
-    ) -> Result<(), String> {
-        sftp.mkdir(dest, 0o755)
-            .map_err(|e| format!("Mkdir {}: {}", dest.display(), e))?;
-
-        let entries = sftp
-            .readdir(src)
-            .map_err(|e| format!("Readdir {}: {}", src.display(), e))?;
-
-        for (entry_path, stat) in &entries {
-            let name = entry_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if name.is_empty() || name == "." || name == ".." {
-                continue;
-            }
-
-            let dest_item = dest.join(&name);
-            if stat.is_dir() {
-                self.copy_dir_recursive_sftp(sftp, entry_path, &dest_item)?;
-            } else {
-                self.copy_file_sftp(sftp, entry_path, &dest_item)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_dir_recursive_sftp(&self, sftp: &ssh2::Sftp, path: &Path) -> Result<(), String> {
-        let entries = sftp
-            .readdir(path)
-            .map_err(|e| format!("Readdir {}: {}", path.display(), e))?;
-
-        for (entry_path, stat) in &entries {
-            let name = entry_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if name == "." || name == ".." {
-                continue;
-            }
-
-            if stat.is_dir() {
-                self.remove_dir_recursive_sftp(sftp, entry_path)?;
-            } else {
-                sftp.unlink(entry_path)
-                    .map_err(|e| format!("Delete {}: {}", entry_path.display(), e))?;
-            }
+    for entry in read_dir {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
         }
 
-        sftp.rmdir(path)
-            .map_err(|e| format!("Rmdir {}: {}", path.display(), e))?;
-        Ok(())
+        let child_path = if path.ends_with('/') {
+            format!("{}{}", path, name)
+        } else {
+            format!("{}/{}", path, name)
+        };
+
+        if entry.metadata().is_dir() {
+            remove_dir_recursive(sftp, &child_path).await?;
+        } else {
+            sftp.remove_file(&child_path)
+                .await
+                .map_err(|e| format!("Delete {}: {}", child_path, e))?;
+        }
     }
+
+    sftp.remove_dir(path)
+        .await
+        .map_err(|e| format!("Rmdir {}: {}", path, e))?;
+    Ok(())
+    })
 }

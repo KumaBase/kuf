@@ -1,5 +1,6 @@
 use crate::fs::FileSystem;
 use crate::FileInfo;
+use crate::format_local_permissions;
 use chrono::{DateTime, Local};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ impl FileSystem for LocalFs {
 
             let is_dir = effective.is_dir();
             let size = if is_dir { 0 } else { effective.len() };
+            let permissions = format_local_permissions(&metadata);
 
             let extension = if is_dir {
                 String::new()
@@ -62,6 +64,7 @@ impl FileSystem for LocalFs {
                 extension,
                 is_hidden,
                 is_symlink,
+                permissions,
             });
         }
 
@@ -81,6 +84,7 @@ impl FileSystem for LocalFs {
                 extension: String::new(),
                 is_hidden: false,
                 is_symlink: false,
+                permissions: String::new(),
             },
         );
 

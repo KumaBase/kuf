@@ -1,4 +1,4 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, onMount, onCleanup, Show } from "solid-js";
 
 interface DialogProps {
   type: "confirm" | "input" | "message";
@@ -18,6 +18,10 @@ export default function Dialog(props: DialogProps) {
     if (props.type === "input") {
       setTimeout(() => inputRef?.focus(), 0);
     }
+  });
+
+  onCleanup(() => {
+    document.querySelector<HTMLElement>(".app")?.focus();
   });
 
   function handleKeyDown(e: KeyboardEvent) {

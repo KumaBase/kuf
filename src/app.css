@@ -168,6 +168,22 @@ body,
   color: var(--text-primary);
 }
 
+.row-permissions {
+  width: 88px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: monospace;
+  margin-right: 4px;
+}
+
+.row-extension {
+  width: 60px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .name-dir {
   color: var(--text-dir);
   font-weight: 600;
@@ -469,6 +485,94 @@ body,
 
 .settings-reset-btn:hover {
   color: var(--text-primary);
+  background: var(--bg-cursor);
+}
+
+/* --- Column reorder list --- */
+
+.column-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.column-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: grab;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.column-item:hover {
+  background: var(--bg-cursor);
+}
+
+.column-item.dragging {
+  opacity: 0.5;
+  background: var(--bg-cursor-active);
+}
+
+.column-drag-handle {
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.column-name {
+  flex: 1;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.column-remove {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.column-remove:hover {
+  color: #f7768e;
+}
+
+.column-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.column-add-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.column-add-chip {
+  padding: 3px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.column-add-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
   background: var(--bg-cursor);
 }
 

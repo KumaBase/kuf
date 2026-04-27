@@ -6,6 +6,7 @@ export interface FileInfo {
   extension: string;
   is_hidden: boolean;
   is_symlink: boolean;
+  permissions: string;
 }
 
 export interface HistoryEntry {
@@ -36,6 +37,8 @@ export interface DisplaySettings {
   row_height: number;
   show_hidden: boolean;
   theme: string;
+  columns: string[];
+  rename_without_extension: boolean;
 }
 
 export interface NavigationSettings {
@@ -48,11 +51,18 @@ export interface SortSettings {
   case_sensitive: boolean;
 }
 
+export interface WindowSettings {
+  mode: string; // "remember" | "fixed"
+  width: number;
+  height: number;
+}
+
 export interface AppSettings {
   display: DisplaySettings;
   navigation: NavigationSettings;
   sort: SortSettings;
   editor: string;
+  window: WindowSettings;
 }
 
 export type Command =

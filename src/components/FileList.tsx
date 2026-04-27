@@ -8,7 +8,7 @@ import {
 } from "solid-js";
 import type { FileInfo } from "../types";
 import { formatSize } from "../types";
-import { rowHeight } from "../state";
+import { rowHeight, settings } from "../state";
 
 interface FileListProps {
   files: FileInfo[];
@@ -27,6 +27,8 @@ export default function FileList(props: FileListProps) {
   const [containerHeight, setContainerHeight] = createSignal(400);
 
   const rh = () => rowHeight();
+  const cols = () => settings()?.display.columns ?? ["extension", "size", "date", "permissions"];
+  const extVisible = () => cols().includes("extension");
 
   const visibleRange = createMemo(() => {
     const h = rh();
@@ -126,12 +128,26 @@ export default function FileList(props: FileListProps) {
                     "name-symlink": file().is_symlink,
                   }}
                 >
-                  {file().name}
+                  {extVisible() && file().extension
+                    ? file().name.slice(0, file().name.length - file().extension.length - 1)
+                    : file().name}
                 </span>
-                <span class="row-size">
-                  {file().is_dir ? "" : formatSize(file().size)}
-                </span>
-                <span class="row-date">{file().modified || ""}</span>
+                <For each={cols()}>
+                  {(col) => {
+                    switch (col) {
+                      case "extension":
+                        return <span class="row-extension">{file().extension ? `.${file().extension}` : ""}</span>;
+                      case "size":
+                        return <span class="row-size">{file().is_dir ? "" : formatSize(file().size)}</span>;
+                      case "date":
+                        return <span class="row-date">{file().modified || ""}</span>;
+                      case "permissions":
+                        return <span class="row-permissions">{file().permissions}</span>;
+                      default:
+                        return null;
+                    }
+                  }}
+                </For>
               </div>
             );
           }}

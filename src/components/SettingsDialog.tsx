@@ -15,12 +15,65 @@ export default function SettingsDialog(props: {
   onApply: () => void;
 }) {
   const [tab, setTab] = createSignal<Tab>("general");
+  const [dragCol, setDragCol] = createSignal<string | null>(null);
+  let listRef!: HTMLDivElement;
+
+  const COL_LABELS: Record<string, string> = { extension: "Extension", size: "Size", date: "Date", permissions: "Permissions" };
+
+  function moveColumn(fromId: string, toId: string) {
+    const current = [...s().display.columns];
+    const fromIdx = current.indexOf(fromId);
+    const toIdx = current.indexOf(toId);
+    if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
+    const [moved] = current.splice(fromIdx, 1);
+    current.splice(toIdx, 0, moved);
+    setEditSettings({ ...s(), display: { ...s().display, columns: current } });
+  }
+
+  function handleDragPointerDown(e: PointerEvent, col: string) {
+    if ((e.target as HTMLElement).closest(".column-remove")) return;
+    e.preventDefault();
+    setDragCol(col);
+  }
+
+  function handleDragPointerMove(e: PointerEvent) {
+    const from = dragCol();
+    if (!from || !listRef) return;
+    const items = listRef.querySelectorAll(".column-item");
+    let targetCol: string | null = null;
+    for (const item of items) {
+      const rect = item.getBoundingClientRect();
+      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        targetCol = (item as HTMLElement).dataset.col ?? null;
+        break;
+      }
+    }
+    if (targetCol && targetCol !== from) {
+      moveColumn(from, targetCol);
+    }
+  }
+
+  function handleDragPointerUp() {
+    setDragCol(null);
+  }
+
+  function removeColumn(col: string) {
+    const current = [...s().display.columns];
+    current.splice(current.indexOf(col), 1);
+    setEditSettings({ ...s(), display: { ...s().display, columns: current } });
+  }
+
+  function addColumn(col: string) {
+    setEditSettings({ ...s(), display: { ...s().display, columns: [...s().display.columns, col] } });
+  }
+
   const [editSettings, setEditSettings] = createSignal<AppSettings>(
     settings() ?? {
-      display: { font_size: 13, row_height: 22, show_hidden: true, theme: "tokyo-night" },
+      display: { font_size: 13, row_height: 22, show_hidden: true, theme: "tokyo-night", columns: ["extension", "size", "date", "permissions"], rename_without_extension: false },
       navigation: { left_dir: "", right_dir: "" },
       sort: { dirs_first: true, case_sensitive: false },
       editor: "vim",
+      window: { mode: "remember", width: 1200, height: 800 },
     }
   );
   const [editKeybinds, setEditKeybinds] = createSignal<Record<string, string>>({
@@ -141,6 +194,15 @@ export default function SettingsDialog(props: {
     };
     document.addEventListener("keydown", handler, true);
     onCleanup(() => document.removeEventListener("keydown", handler, true));
+
+    const onMove = (e: PointerEvent) => handleDragPointerMove(e);
+    const onUp = () => handleDragPointerUp();
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    onCleanup(() => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    });
   });
 
   return (
@@ -259,6 +321,66 @@ export default function SettingsDialog(props: {
             </div>
 
             <div class="settings-section">
+              <div class="settings-section-title">Columns</div>
+              <div
+                class="column-list"
+                ref={listRef}
+              >
+                <For each={s().display.columns}>
+                  {(col) => (
+                    <div
+                      class="column-item"
+                      classList={{ dragging: dragCol() === col }}
+                      data-col={col}
+                      onPointerDown={(e) => handleDragPointerDown(e, col)}
+                    >
+                      <span class="column-drag-handle">&#9776;</span>
+                      <span class="column-name">{COL_LABELS[col] || col}</span>
+                      <button
+                        class="column-remove"
+                        onClick={() => removeColumn(col)}
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </div>
+              <Show when={s().display.columns.length < 4}>
+                <div class="column-add-row">
+                  <span class="column-add-label">Add:</span>
+                  <For each={["extension", "size", "date", "permissions"].filter(c => !s().display.columns.includes(c))}>
+                    {(col) => (
+                      <button
+                        class="column-add-chip"
+                        onClick={() => addColumn(col)}
+                      >
+                        + {COL_LABELS[col]}
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <label class="settings-row" style="margin-top: 8px;">
+                <span class="settings-label">Rename Without Extension</span>
+                <input
+                  class="settings-checkbox"
+                  type="checkbox"
+                  checked={s().display.rename_without_extension}
+                  onChange={(e) =>
+                    setEditSettings({
+                      ...s(),
+                      display: {
+                        ...s().display,
+                        rename_without_extension: e.currentTarget.checked,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+
+            <div class="settings-section">
               <div class="settings-section-title">Navigation</div>
               <label class="settings-row">
                 <span class="settings-label">Left Dir</span>
@@ -348,6 +470,69 @@ export default function SettingsDialog(props: {
                       sort: {
                         ...s().sort,
                         case_sensitive: e.currentTarget.checked,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-section-title">Window</div>
+              <label class="settings-row">
+                <span class="settings-label">Startup Size</span>
+                <select
+                  class="settings-input"
+                  value={s().window.mode}
+                  onChange={(e) =>
+                    setEditSettings({
+                      ...s(),
+                      window: {
+                        ...s().window,
+                        mode: e.currentTarget.value,
+                      },
+                    })
+                  }
+                >
+                  <option value="remember">Remember last size</option>
+                  <option value="fixed">Fixed size</option>
+                </select>
+              </label>
+              <label class="settings-row">
+                <span class="settings-label">Width</span>
+                <input
+                  class="settings-input"
+                  type="number"
+                  min="400"
+                  max="3840"
+                  value={s().window.width}
+                  disabled={s().window.mode === "remember"}
+                  onInput={(e) =>
+                    setEditSettings({
+                      ...s(),
+                      window: {
+                        ...s().window,
+                        width: Number(e.currentTarget.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label class="settings-row">
+                <span class="settings-label">Height</span>
+                <input
+                  class="settings-input"
+                  type="number"
+                  min="300"
+                  max="2160"
+                  value={s().window.height}
+                  disabled={s().window.mode === "remember"}
+                  onInput={(e) =>
+                    setEditSettings({
+                      ...s(),
+                      window: {
+                        ...s().window,
+                        height: Number(e.currentTarget.value),
                       },
                     })
                   }

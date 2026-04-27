@@ -4,12 +4,33 @@ use std::path::PathBuf;
 
 // --- Settings types ---
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 pub struct DisplaySettings {
     pub font_size: u32,
     pub row_height: u32,
     pub show_hidden: bool,
     pub theme: String,
+    pub columns: Vec<String>,
+    pub rename_without_extension: bool,
+}
+
+impl DisplaySettings {
+    pub fn defaults() -> Self {
+        Self {
+            font_size: 13,
+            row_height: 22,
+            show_hidden: true,
+            theme: "tokyo-night".to_string(),
+            columns: vec![
+                "extension".to_string(),
+                "size".to_string(),
+                "date".to_string(),
+                "permissions".to_string(),
+            ],
+            rename_without_extension: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -24,23 +45,37 @@ pub struct SortSettings {
     pub case_sensitive: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct WindowSettings {
+    pub mode: String,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl WindowSettings {
+    pub fn defaults() -> Self {
+        Self {
+            mode: "remember".to_string(),
+            width: 1200.0,
+            height: 800.0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppSettings {
     pub display: DisplaySettings,
     pub navigation: NavigationSettings,
     pub sort: SortSettings,
     pub editor: String,
+    pub window: WindowSettings,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            display: DisplaySettings {
-                font_size: 13,
-                row_height: 22,
-                show_hidden: true,
-                theme: "tokyo-night".to_string(),
-            },
+            display: DisplaySettings::defaults(),
             navigation: NavigationSettings {
                 left_dir: String::new(),
                 right_dir: String::new(),
@@ -50,6 +85,7 @@ impl Default for AppSettings {
                 case_sensitive: false,
             },
             editor: "vim".to_string(),
+            window: WindowSettings::defaults(),
         }
     }
 }
@@ -90,7 +126,8 @@ fn default_keybinds_toml() -> String {
 "ArrowDown" = "cursor_down"
 "Home" = "cursor_top"
 "End" = "cursor_bottom"
-"Enter" = "preview"
+"Enter" = "enter"
+"Shift+Enter" = "preview"
 "Backspace" = "parent_dir"
 "Tab" = "switch_pane"
 " " = "toggle_select"

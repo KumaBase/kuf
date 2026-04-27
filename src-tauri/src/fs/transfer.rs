@@ -1,85 +1,102 @@
-use ssh2::Session;
-use std::io::{Read, Write};
+use crate::ssh::connection::SshHandle;
+use russh_sftp::client::SftpSession;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+async fn create_sftp(handle: &SshHandle) -> Result<SftpSession, String> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Open channel: {}", e))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("Request SFTP subsystem: {}", e))?;
+    SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP init: {}", e))
+}
 
 /// Copy files from local filesystem to remote (SFTP)
-pub fn copy_local_to_remote(
+pub async fn copy_local_to_remote(
     local_paths: &[PathBuf],
     remote_dest: &Path,
-    session: &Session,
+    handle: &SshHandle,
 ) -> Result<(), String> {
-    let sftp_channel = session
-        .sftp()
-        .map_err(|e| format!("SFTP channel: {}", e))?;
+    let sftp = create_sftp(handle).await?;
+    let remote_dest_str = remote_dest.to_string_lossy().to_string();
 
     for local_path in local_paths {
         let file_name = local_path
             .file_name()
-            .ok_or_else(|| format!("Invalid path: {}", local_path.display()))?;
-        let remote_item = remote_dest.join(file_name);
+            .ok_or_else(|| format!("Invalid path: {}", local_path.display()))?
+            .to_string_lossy()
+            .to_string();
+        let remote_item = format!("{}/{}", remote_dest_str, file_name);
 
         if local_path.is_dir() {
-            copy_local_dir_to_remote(&local_path, &remote_item, &sftp_channel)?;
+            copy_local_dir_to_remote(&local_path, &remote_item, &sftp).await?;
         } else {
-            copy_local_file_to_remote(&local_path, &remote_item, &sftp_channel)?;
+            copy_local_file_to_remote(&local_path, &remote_item, &sftp).await?;
         }
     }
     Ok(())
 }
 
 /// Copy files from remote (SFTP) to local filesystem
-pub fn copy_remote_to_local(
+pub async fn copy_remote_to_local(
     remote_paths: &[PathBuf],
     local_dest: &Path,
-    session: &Session,
+    handle: &SshHandle,
 ) -> Result<(), String> {
-    let sftp_channel = session
-        .sftp()
-        .map_err(|e| format!("SFTP channel: {}", e))?;
+    let sftp = create_sftp(handle).await?;
 
     for remote_path in remote_paths {
         let file_name = remote_path
             .file_name()
-            .ok_or_else(|| format!("Invalid path: {}", remote_path.display()))?;
-        let local_item = local_dest.join(file_name);
+            .ok_or_else(|| format!("Invalid path: {}", remote_path.display()))?
+            .to_string_lossy()
+            .to_string();
+        let local_item = local_dest.join(&file_name);
+        let remote_str = remote_path.to_string_lossy().to_string();
 
-        let stat = sftp_channel
-            .stat(remote_path)
+        let stat = sftp
+            .metadata(&remote_str)
+            .await
             .map_err(|e| format!("Stat {}: {}", remote_path.display(), e))?;
 
         if stat.is_dir() {
-            copy_remote_dir_to_local(&remote_path, &local_item, &sftp_channel)?;
+            copy_remote_dir_to_local(&remote_str, &local_item, &sftp).await?;
         } else {
-            copy_remote_file_to_local(&remote_path, &local_item, &sftp_channel)?;
+            copy_remote_file_to_local(&remote_str, &local_item, &sftp).await?;
         }
     }
     Ok(())
 }
 
-fn copy_local_file_to_remote(
+async fn copy_local_file_to_remote(
     local_path: &Path,
-    remote_path: &Path,
-    sftp: &ssh2::Sftp,
+    remote_path: &str,
+    sftp: &SftpSession,
 ) -> Result<(), String> {
     let content = std::fs::read(local_path)
         .map_err(|e| format!("Read {}: {}", local_path.display(), e))?;
-
-    let mut remote_file = sftp
-        .create(remote_path)
-        .map_err(|e| format!("Create {}: {}", remote_path.display(), e))?;
-    remote_file
-        .write_all(&content)
-        .map_err(|e| format!("Write {}: {}", remote_path.display(), e))?;
+    sftp.write(remote_path, &content)
+        .await
+        .map_err(|e| format!("Write {}: {}", remote_path, e))?;
     Ok(())
 }
 
-fn copy_local_dir_to_remote(
-    local_path: &Path,
-    remote_path: &Path,
-    sftp: &ssh2::Sftp,
-) -> Result<(), String> {
-    sftp.mkdir(remote_path, 0o755)
-        .map_err(|e| format!("Mkdir {}: {}", remote_path.display(), e))?;
+fn copy_local_dir_to_remote<'a>(
+    local_path: &'a Path,
+    remote_path: &'a str,
+    sftp: &'a SftpSession,
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+    sftp.create_dir(remote_path)
+        .await
+        .map_err(|e| format!("Mkdir {}: {}", remote_path, e))?;
 
     let entries = std::fs::read_dir(local_path)
         .map_err(|e| format!("Readdir {}: {}", local_path.display(), e))?;
@@ -88,63 +105,61 @@ fn copy_local_dir_to_remote(
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
         let local_item = entry.path();
-        let remote_item = remote_path.join(&name);
+        let remote_item = format!("{}/{}", remote_path, name);
 
         if local_item.is_dir() {
-            copy_local_dir_to_remote(&local_item, &remote_item, sftp)?;
+            copy_local_dir_to_remote(&local_item, &remote_item, sftp).await?;
         } else {
-            copy_local_file_to_remote(&local_item, &remote_item, sftp)?;
+            copy_local_file_to_remote(&local_item, &remote_item, sftp).await?;
         }
     }
     Ok(())
+    })
 }
 
-fn copy_remote_file_to_local(
-    remote_path: &Path,
+async fn copy_remote_file_to_local(
+    remote_path: &str,
     local_path: &Path,
-    sftp: &ssh2::Sftp,
+    sftp: &SftpSession,
 ) -> Result<(), String> {
-    let mut remote_file = sftp
-        .open(remote_path)
-        .map_err(|e| format!("Open {}: {}", remote_path.display(), e))?;
-    let mut content = Vec::new();
-    remote_file
-        .read_to_end(&mut content)
-        .map_err(|e| format!("Read {}: {}", remote_path.display(), e))?;
-
+    let content = sftp
+        .read(remote_path)
+        .await
+        .map_err(|e| format!("Read {}: {}", remote_path, e))?;
     std::fs::write(local_path, content)
         .map_err(|e| format!("Write {}: {}", local_path.display(), e))?;
     Ok(())
 }
 
-fn copy_remote_dir_to_local(
-    remote_path: &Path,
-    local_path: &Path,
-    sftp: &ssh2::Sftp,
-) -> Result<(), String> {
+fn copy_remote_dir_to_local<'a>(
+    remote_path: &'a str,
+    local_path: &'a Path,
+    sftp: &'a SftpSession,
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
     std::fs::create_dir_all(local_path)
         .map_err(|e| format!("Mkdir {}: {}", local_path.display(), e))?;
 
-    let entries = sftp
-        .readdir(remote_path)
-        .map_err(|e| format!("Readdir {}: {}", remote_path.display(), e))?;
+    let read_dir = sftp
+        .read_dir(remote_path.to_string())
+        .await
+        .map_err(|e| format!("Readdir {}: {}", remote_path, e))?;
 
-    for (entry_path, stat) in &entries {
-        let name = entry_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+    for entry in read_dir {
+        let name = entry.file_name();
         if name.is_empty() || name == "." || name == ".." {
             continue;
         }
 
         let local_item = local_path.join(&name);
+        let remote_item = format!("{}/{}", remote_path, name);
 
-        if stat.is_dir() {
-            copy_remote_dir_to_local(entry_path, &local_item, sftp)?;
+        if entry.metadata().is_dir() {
+            copy_remote_dir_to_local(&remote_item, &local_item, sftp).await?;
         } else {
-            copy_remote_file_to_local(entry_path, &local_item, sftp)?;
+            copy_remote_file_to_local(&remote_item, &local_item, sftp).await?;
         }
     }
     Ok(())
+    })
 }

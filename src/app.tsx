@@ -341,6 +341,13 @@ function App() {
           } else {
             await active.navigateTo(joinPath(active.state.path, file.name));
           }
+        } else if (file && file.name !== "..") {
+          const fullPath = joinPath(active.state.path, file.name);
+          try {
+            await invoke("open_file", { path: fullPath });
+          } catch (e) {
+            flashStatus(`Open error: ${e}`);
+          }
         }
         break;
       }
@@ -632,13 +639,19 @@ function App() {
         const file = active.state.files[active.state.cursorIndex];
         if (!file) break;
         const isRemoteRename = isRemotePath(active.state.path);
+        const noExt = settings()?.display.rename_without_extension && file.extension;
+        const displayName = noExt
+          ? file.name.slice(0, file.name.length - file.extension.length - 1)
+          : file.name;
+        const originalExt = noExt ? `.${file.extension}` : "";
         setDialog({
           type: "input",
           title: "Rename",
           message: `Rename: ${file.name}`,
-          defaultValue: file.name,
+          defaultValue: displayName,
           onOk: async (newName?: string) => {
-            if (!newName || newName === file.name) {
+            const fullName = newName + originalExt;
+            if (!newName || fullName === file.name) {
               setDialog(null);
               return;
             }
@@ -652,15 +665,15 @@ function App() {
                     host: parsed.host,
                     port: parsed.port,
                     path: fullPath,
-                    newName,
+                    newName: fullName,
                   });
                 }
               } else {
                 const fullPath = joinPath(active.state.path, file.name);
-                await invoke("rename_item", { path: fullPath, newName });
+                await invoke("rename_item", { path: fullPath, newName: fullName });
               }
               await active.refresh();
-              flashStatus(`Renamed to ${newName}`);
+              flashStatus(`Renamed to ${fullName}`);
             } catch (e) {
               setDialog({
                 type: "message",
@@ -681,7 +694,7 @@ function App() {
           type: "input",
           title: "New Folder",
           message: "Folder name:",
-          defaultValue: "NewFolder",
+          defaultValue: "",
           onOk: async (name?: string) => {
             if (!name) {
               setDialog(null);
@@ -872,7 +885,10 @@ function App() {
       </Show>
       <Show when={showSettings()}>
         <SettingsDialog
-          onClose={() => setShowSettings(false)}
+          onClose={() => {
+            setShowSettings(false);
+            document.querySelector<HTMLElement>(".app")?.focus();
+          }}
           onApply={() => {
             const s = settings();
             if (s) applySettingsToDOM(s);
@@ -881,7 +897,10 @@ function App() {
       </Show>
       <Show when={showBookmarks()}>
         <BookmarkDialog
-          onClose={() => setShowBookmarks(false)}
+          onClose={() => {
+            setShowBookmarks(false);
+            document.querySelector<HTMLElement>(".app")?.focus();
+          }}
           onNavigate={async (path) => {
             await getActive().navigateTo(path);
           }}
@@ -896,7 +915,10 @@ function App() {
       </Show>
       <Show when={showConnect()}>
         <ConnectDialog
-          onClose={() => setShowConnect(false)}
+          onClose={() => {
+            setShowConnect(false);
+            document.querySelector<HTMLElement>(".app")?.focus();
+          }}
           onConnected={(host, user, port, path) => {
             const remotePath = buildRemotePath(host, user, port, path);
             getActive().navigateTo(remotePath);

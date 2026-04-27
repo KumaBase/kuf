@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::Emitter;
+use tauri::Manager;
 
 // --- Bookmark state (in-memory, persisted to file) ---
 
@@ -84,9 +85,34 @@ pub struct FileInfo {
     pub extension: String,
     pub is_hidden: bool,
     pub is_symlink: bool,
+    pub permissions: String,
 }
 
 // --- Local filesystem commands (delegated to LocalFs) ---
+
+pub fn format_unix_permissions(mode: u32) -> String {
+    let bits = [
+        (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
+        (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
+        (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+    ];
+    let mut s = String::with_capacity(9);
+    for (bit, ch) in &bits {
+        if mode & *bit != 0 { s.push(*ch); } else { s.push('-'); }
+    }
+    s
+}
+
+#[cfg(windows)]
+pub fn format_local_permissions(meta: &std::fs::Metadata) -> String {
+    if meta.permissions().readonly() { "r--r--r--".to_string() } else { "rw-rw-rw-".to_string() }
+}
+
+#[cfg(unix)]
+pub fn format_local_permissions(meta: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    format_unix_permissions(meta.permissions().mode())
+}
 
 #[tauri::command]
 fn home_dir() -> Result<String, String> {
@@ -193,12 +219,20 @@ async fn ssh_connect(
         });
 
     let auth_method = auth.unwrap_or(ssh::connection::AuthMethod::Default);
-    let session = state.connect(&host_config, &auth_method)?;
+    let handle = state.connect(&host_config, &auth_method).await?;
 
     // Verify SFTP works
-    session
-        .sftp()
-        .map_err(|e| format!("SFTP channel test failed: {}", e))?;
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("SFTP channel test: {}", e))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("SFTP subsystem: {}", e))?;
+    let _sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP init: {}", e))?;
 
     Ok(())
 }
@@ -219,11 +253,10 @@ async fn ssh_read_dir(
     path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<Vec<FileInfo>, String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.read_dir(Path::new(&path))
+    fs::sftp::SftpFs::read_dir(&handle, Path::new(&path)).await
 }
 
 #[tauri::command]
@@ -233,12 +266,11 @@ async fn ssh_delete_items(
     paths: Vec<String>,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
     let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    sftp.delete_items(&path_bufs)
+    fs::sftp::SftpFs::delete_items(&handle, &path_bufs).await
 }
 
 #[tauri::command]
@@ -249,11 +281,10 @@ async fn ssh_rename_item(
     new_name: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.rename_item(Path::new(&path), &new_name)
+    fs::sftp::SftpFs::rename_item(&handle, Path::new(&path), &new_name).await
 }
 
 #[tauri::command]
@@ -264,11 +295,10 @@ async fn ssh_create_dir(
     name: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.create_dir(Path::new(&path), &name)
+    fs::sftp::SftpFs::create_dir(&handle, Path::new(&path), &name).await
 }
 
 #[tauri::command]
@@ -278,11 +308,10 @@ async fn ssh_path_exists(
     path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<bool, String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.path_exists(Path::new(&path))
+    fs::sftp::SftpFs::path_exists(&handle, Path::new(&path)).await
 }
 
 #[tauri::command]
@@ -292,11 +321,10 @@ async fn ssh_read_file_text(
     path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<String, String> {
-    let session = state
+    let handle = state
         .get(&host, port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", host))?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.read_file_text(Path::new(&path))
+    fs::sftp::SftpFs::read_file_text(&handle, Path::new(&path)).await
 }
 
 #[tauri::command]
@@ -318,7 +346,9 @@ async fn ssh_accept_host(
             port: port.unwrap_or(22),
             identity_file: None,
         });
-    state.accept_host_key(&host_config)
+    // With russh, host key is accepted during connect (TOFU handled by known_hosts)
+    let _ = host_config;
+    Ok(())
 }
 
 // --- Cross-filesystem transfer commands ---
@@ -331,11 +361,11 @@ async fn ssh_copy_to_remote(
     remote_path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&remote_host, remote_port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", remote_host))?;
     let local_path_bufs: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
-    fs::transfer::copy_local_to_remote(&local_path_bufs, Path::new(&remote_path), &session)
+    fs::transfer::copy_local_to_remote(&local_path_bufs, Path::new(&remote_path), &handle).await
 }
 
 #[tauri::command]
@@ -346,11 +376,11 @@ async fn ssh_copy_from_remote(
     local_path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&remote_host, remote_port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", remote_host))?;
     let remote_path_bufs: Vec<PathBuf> = remote_paths.iter().map(PathBuf::from).collect();
-    fs::transfer::copy_remote_to_local(&remote_path_bufs, Path::new(&local_path), &session)
+    fs::transfer::copy_remote_to_local(&remote_path_bufs, Path::new(&local_path), &handle).await
 }
 
 #[tauri::command]
@@ -361,12 +391,11 @@ async fn ssh_move_to_remote(
     remote_path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    // Copy to remote, then delete local
-    let session = state
+    let handle = state
         .get(&remote_host, remote_port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", remote_host))?;
     let local_path_bufs: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
-    fs::transfer::copy_local_to_remote(&local_path_bufs, Path::new(&remote_path), &session)?;
+    fs::transfer::copy_local_to_remote(&local_path_bufs, Path::new(&remote_path), &handle).await?;
     let local = LocalFs;
     local.delete_items(&local_path_bufs)?;
     Ok(())
@@ -380,19 +409,28 @@ async fn ssh_move_from_remote(
     local_path: String,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let session = state
+    let handle = state
         .get(&remote_host, remote_port.unwrap_or(22))
         .ok_or_else(|| format!("Not connected to {}", remote_host))?;
     let remote_path_bufs: Vec<PathBuf> = remote_paths.iter().map(PathBuf::from).collect();
-    fs::transfer::copy_remote_to_local(&remote_path_bufs, Path::new(&local_path), &session)?;
-    let sftp = fs::sftp::SftpFs::new((*session).clone());
-    sftp.delete_items(&remote_path_bufs)?;
+    fs::transfer::copy_remote_to_local(&remote_path_bufs, Path::new(&local_path), &handle).await?;
+    fs::sftp::SftpFs::delete_items(&handle, &remote_path_bufs).await?;
     Ok(())
 }
 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            // Apply window size from settings
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(settings) = config::settings_load() {
+                    let _ = window.set_size(tauri::LogicalSize::new(
+                        settings.window.width,
+                        settings.window.height,
+                    ));
+                }
+            }
+
             let menu = Menu::with_items(app, &[
                 &Submenu::with_items(app, "kuf", true, &[
                     &MenuItem::with_id(app, "about", "About kuf", true, None::<&str>)?,
@@ -440,6 +478,19 @@ pub fn run() {
         })
         .on_menu_event(|app, event| {
             let _ = app.emit("menu-event", event.id().as_ref());
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Ok(size) = window.inner_size() {
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    let logical = size.to_logical(scale);
+                    if let Ok(mut settings) = config::settings_load() {
+                        settings.window.width = logical.width;
+                        settings.window.height = logical.height;
+                        let _ = config::settings_save(settings);
+                    }
+                }
+            }
         })
         .manage(Bookmarks(Mutex::new(load_bookmarks_from_file())))
         .manage(ssh::connection::ConnectionManager::new())
