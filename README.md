@@ -8,7 +8,30 @@ Dual-pane file manager built with Tauri 2.0 + SolidJS.
 
 - **Node.js** >= 18
 - **Rust** >= 1.70 (install via [rustup](https://rustup.rs))
-- **macOS** (primary target)
+- **System WebView** (ships with the OS on all platforms)
+
+### Platform-specific
+
+| Platform | Additional requirements |
+|----------|------------------------|
+| macOS    | Xcode Command Line Tools (`xcode-select --install`) |
+| Windows  | [Microsoft Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+| Linux    | `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev` |
+
+<details>
+<summary>Linux dependency install commands</summary>
+
+```bash
+# Debian / Ubuntu
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel
+
+# Arch
+sudo pacman -S webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg
+```
+</details>
 
 ## Getting Started
 
@@ -23,12 +46,14 @@ npx tauri dev
 ## Build
 
 ```bash
-# Production build (.app)
-npx tauri build --bundles app
-
-# Output:
-#   macOS: src-tauri/target/release/bundle/macos/kuf.app
+npx tauri build
 ```
+
+| Platform | Output |
+|----------|--------|
+| macOS    | `src-tauri/target/release/bundle/macos/kuf.app` |
+| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.1.0_x64_en-US.msi` |
+| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.1.0_amd64.deb` |
 
 ## Type Check
 
@@ -84,7 +109,12 @@ Keybindings can be customized from Settings (Ctrl+,) > Keymap.
 
 ## Configuration
 
-Config files are stored in `~/.config/kuf/`:
+Config files are stored in the platform-specific config directory:
+
+| Platform | Path |
+|----------|------|
+| macOS / Linux | `~/.config/kuf/` |
+| Windows | `%APPDATA%\kuf\` |
 
 - `settings.toml` — Display, navigation, sort, editor settings
 - `keybind.toml` — Custom key bindings

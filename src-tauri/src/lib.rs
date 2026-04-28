@@ -168,10 +168,23 @@ fn path_exists(path: String) -> Result<bool, String> {
 
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to open: {}", e))?;
+    let result = {
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open").arg(&path).spawn()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path])
+                .spawn()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open").arg(&path).spawn()
+        }
+    };
+    result.map_err(|e| format!("Failed to open: {}", e))?;
     Ok(())
 }
 
@@ -332,10 +345,10 @@ async fn ssh_accept_host(
     host: String,
     port: Option<u16>,
     user: Option<String>,
-    state: tauri::State<'_, ssh::connection::ConnectionManager>,
+    _state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
     let hosts = ssh::config::load_ssh_config()?;
-    let host_config = hosts
+    let _host_config = hosts
         .iter()
         .find(|h| h.alias == host)
         .cloned()
@@ -347,7 +360,6 @@ async fn ssh_accept_host(
             identity_file: None,
         });
     // With russh, host key is accepted during connect (TOFU handled by known_hosts)
-    let _ = host_config;
     Ok(())
 }
 

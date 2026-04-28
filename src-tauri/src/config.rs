@@ -93,13 +93,12 @@ impl Default for AppSettings {
 // --- Config directory ---
 
 pub fn config_dir() -> Result<PathBuf, String> {
-    dirs::home_dir()
+    dirs::config_dir()
         .map(|mut p| {
-            p.push(".config");
             p.push("kuf");
             p
         })
-        .ok_or_else(|| "Cannot determine home directory".to_string())
+        .ok_or_else(|| "Cannot determine config directory".to_string())
 }
 
 fn settings_path() -> Result<PathBuf, String> {

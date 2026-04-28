@@ -22,25 +22,28 @@ impl FileSystem for LocalFs {
                 Err(_) => continue,
             };
 
-            let metadata = match entry.metadata() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_hidden = name.starts_with('.');
+
+            // Detect links without following them so junctions/symlinks can be
+            // handled safely on both Unix and Windows.
+            let link_metadata = match fs::symlink_metadata(entry.path()) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_hidden = name.starts_with('.');
-            let is_symlink = metadata.is_symlink();
+            let is_symlink = link_metadata.is_symlink()
+                || link_metadata.file_type().is_symlink();
 
             let resolved = if is_symlink {
                 fs::metadata(entry.path()).ok()
             } else {
                 None
             };
-            let effective = resolved.as_ref().unwrap_or(&metadata);
+            let effective = resolved.as_ref().unwrap_or(&link_metadata);
 
             let is_dir = effective.is_dir();
             let size = if is_dir { 0 } else { effective.len() };
-            let permissions = format_local_permissions(&metadata);
+            let permissions = format_local_permissions(&link_metadata);
 
             let extension = if is_dir {
                 String::new()
@@ -134,7 +137,19 @@ impl FileSystem for LocalFs {
 
     fn delete_items(&self, paths: &[PathBuf]) -> Result<(), String> {
         for path in paths {
-            if path.is_dir() {
+            let is_link = fs::symlink_metadata(path)
+                .map(|m| m.is_symlink() || m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            if is_link {
+                if path.is_dir() {
+                    fs::remove_dir(path)
+                        .map_err(|e| format!("Delete link failed: {}: {}", path.display(), e))?;
+                } else {
+                    fs::remove_file(path)
+                        .map_err(|e| format!("Delete link failed: {}: {}", path.display(), e))?;
+                }
+            } else if path.is_dir() {
                 fs::remove_dir_all(path)
                     .map_err(|e| format!("Delete failed: {}: {}", path.display(), e))?;
             } else {
@@ -181,12 +196,39 @@ impl FileSystem for LocalFs {
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    if let Ok(link_meta) = fs::symlink_metadata(src) {
+        if link_meta.is_symlink() || link_meta.file_type().is_symlink() {
+            let target = fs::read_link(src)
+                .map_err(|e| format!("Read link failed: {}: {}", src.display(), e))?;
+            #[cfg(target_os = "windows")]
+            {
+                if target.is_dir() || src.is_dir() {
+                    std::os::windows::fs::symlink_dir(&target, dest)
+                        .map_err(|e| format!("Create junction/symlink failed: {}", e))?;
+                } else {
+                    std::os::windows::fs::symlink_file(&target, dest)
+                        .map_err(|e| format!("Create symlink failed: {}", e))?;
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::os::unix::fs::symlink(&target, dest)
+                    .map_err(|e| format!("Create symlink failed: {}", e))?;
+            }
+            return Ok(());
+        }
+    }
+
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let src_item = entry.path();
         let dest_item = dest.join(entry.file_name());
-        if src_item.is_dir() {
+        let is_link = fs::symlink_metadata(&src_item)
+            .map(|m| m.is_symlink() || m.file_type().is_symlink())
+            .unwrap_or(false);
+
+        if is_link || src_item.is_dir() {
             copy_dir_recursive(&src_item, &dest_item)?;
         } else {
             fs::copy(&src_item, &dest_item)
