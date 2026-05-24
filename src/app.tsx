@@ -9,6 +9,7 @@ import BookmarkDialog from "./components/BookmarkDialog";
 import TabBar from "./components/TabBar";
 import FileViewer from "./components/FileViewer";
 import ConnectDialog from "./components/ConnectDialog";
+import DriveDialog from "./components/DriveDialog";
 import {
   createPaneState,
   keybinds,
@@ -26,7 +27,7 @@ import {
   showHidden,
   type PaneActions,
 } from "./state";
-import type { Command, Side, AppSettings, FileInfo, TabSnapshot } from "./types";
+import type { Command, Side, AppSettings, FileInfo, TabSnapshot, ConnectedServer } from "./types";
 import { joinPath, parentPath, isRemotePath, parseRemotePath, buildRemotePath, remotePathHost } from "./types";
 
 function App() {
@@ -49,6 +50,7 @@ function App() {
   const [showSettings, setShowSettings] = createSignal(false);
   const [showBookmarks, setShowBookmarks] = createSignal(false);
   const [showConnect, setShowConnect] = createSignal(false);
+  const [showDrives, setShowDrives] = createSignal(false);
   const [showViewer, setShowViewer] = createSignal<{
     path: string;
     fileName: string;
@@ -220,7 +222,7 @@ function App() {
       setLoading(false);
     }
 
-    listen<string>("menu-event", (event) => {
+    listen<string>("menu-event", async (event) => {
       const id = event.payload;
       const commandMap: Record<string, Command> = {
         new_folder: "new_folder",
@@ -266,6 +268,21 @@ function App() {
         setShowConnect(true);
       } else if (id === "ssh_disconnect") {
         executeCommand("ssh_disconnect");
+      } else if (id === "drive_list") {
+        setShowDrives(true);
+      } else if (id.startsWith("ssh_server:")) {
+        const parts = id.split(":");
+        const alias = parts[1];
+        const port = parseInt(parts[2]) || 22;
+        try {
+          const connections = await invoke<ConnectedServer[]>("ssh_list_connections");
+          const server = connections.find(c => c.alias === alias && c.port === port);
+          if (server) {
+            getActive().navigateTo(buildRemotePath(server.alias, server.user, server.port, "/"));
+          }
+        } catch (e) {
+          flashStatus(`Menu navigate error: ${e}`);
+        }
       } else if (id === "quit") {
         // Handled by OS on macOS
       } else {
@@ -389,6 +406,9 @@ function App() {
       }
       case "bookmark_list":
         setShowBookmarks(true);
+        break;
+      case "drive_list":
+        setShowDrives(true);
         break;
       case "sync_to_other":
         await active.navigateTo(getInactive().state.path);
@@ -805,6 +825,7 @@ function App() {
     if (showSettings()) return;
     if (showBookmarks()) return;
     if (showConnect()) return;
+    if (showDrives()) return;
 
     // Ctrl+, = open settings
     if ((e.ctrlKey || e.metaKey) && e.key === ",") {
@@ -922,6 +943,17 @@ function App() {
           onConnected={(host, user, port, path) => {
             const remotePath = buildRemotePath(host, user, port, path);
             getActive().navigateTo(remotePath);
+          }}
+        />
+      </Show>
+      <Show when={showDrives()}>
+        <DriveDialog
+          onClose={() => {
+            setShowDrives(false);
+            document.querySelector<HTMLElement>(".app")?.focus();
+          }}
+          onNavigate={async (path) => {
+            await getActive().navigateTo(path);
           }}
         />
       </Show>

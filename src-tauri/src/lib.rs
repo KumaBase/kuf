@@ -15,6 +15,8 @@ use tauri::Manager;
 
 struct Bookmarks(Mutex<Vec<String>>);
 
+struct RemoteSubMenu(Submenu<tauri::Wry>);
+
 #[tauri::command]
 fn bookmark_list(state: tauri::State<Bookmarks>) -> Vec<String> {
     state.0.lock().unwrap().clone()
@@ -86,6 +88,15 @@ pub struct FileInfo {
     pub is_hidden: bool,
     pub is_symlink: bool,
     pub permissions: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DriveInfo {
+    pub name: String,
+    pub path: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub drive_type: String,
 }
 
 // --- Local filesystem commands (delegated to LocalFs) ---
@@ -203,6 +214,53 @@ fn read_file_text(path: String) -> Result<String, String> {
     local.read_file_text(Path::new(&path))
 }
 
+// --- Drive listing ---
+
+#[tauri::command]
+fn list_drives() -> Result<Vec<DriveInfo>, String> {
+    let mut drives = Vec::new();
+
+    // Always include root "/"
+    if let Some(info) = drive_info_for("/", "Macintosh HD") {
+        drives.push(info);
+    }
+
+    // Read /Volumes for additional mounts
+    if let Ok(entries) = std::fs::read_dir("/Volumes") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(info) = drive_info_for(path.to_string_lossy().as_ref(), &name) {
+                drives.push(info);
+            }
+        }
+    }
+
+    Ok(drives)
+}
+
+fn drive_info_for(path: &str, name: &str) -> Option<DriveInfo> {
+    let p = Path::new(path);
+    let total = fs4::total_space(p).ok()?;
+    let available = fs4::free_space(p).ok()?;
+    Some(DriveInfo {
+        name: name.to_string(),
+        path: path.to_string(),
+        total_bytes: total,
+        available_bytes: available,
+        drive_type: "Unknown".to_string(),
+    })
+}
+
 // --- SSH / SFTP commands ---
 
 #[tauri::command]
@@ -217,6 +275,7 @@ async fn ssh_connect(
     user: Option<String>,
     auth: Option<ssh::connection::AuthMethod>,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let hosts = ssh::config::load_ssh_config()?;
     let host_config = hosts
@@ -247,6 +306,8 @@ async fn ssh_connect(
         .await
         .map_err(|e| format!("SFTP init: {}", e))?;
 
+    rebuild_remote_menu(&app)?;
+
     Ok(())
 }
 
@@ -255,8 +316,18 @@ async fn ssh_disconnect(
     host: String,
     port: Option<u16>,
     state: tauri::State<'_, ssh::connection::ConnectionManager>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    state.disconnect(&host, port.unwrap_or(22))
+    state.disconnect(&host, port.unwrap_or(22))?;
+    rebuild_remote_menu(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ssh_list_connections(
+    state: tauri::State<'_, ssh::connection::ConnectionManager>,
+) -> Vec<ssh::connection::ConnectedServer> {
+    state.list_connections()
 }
 
 #[tauri::command]
@@ -430,6 +501,41 @@ async fn ssh_move_from_remote(
     Ok(())
 }
 
+fn rebuild_remote_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    let conn_mgr = app.state::<ssh::connection::ConnectionManager>();
+    let connections = conn_mgr.list_connections();
+
+    let remote_menu = app.state::<RemoteSubMenu>();
+
+    // Remove all dynamic items (after the 2 base items: Connect, Disconnect)
+    loop {
+        let items = remote_menu.0.items().map_err(|e| e.to_string())?;
+        if items.len() <= 2 {
+            break;
+        }
+        if let Some(last) = items.last() {
+            remote_menu.0.remove(last).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Add dynamic items if there are connections
+    if !connections.is_empty() {
+        let sep = PredefinedMenuItem::separator(app)
+            .map_err(|e| format!("Separator: {}", e))?;
+        remote_menu.0.append(&sep).map_err(|e| e.to_string())?;
+
+        for server in &connections {
+            let id = format!("ssh_server:{}:{}", server.alias, server.port);
+            let label = format!("{} ({})", server.alias, server.user);
+            let item = MenuItem::with_id(app, &id, label, true, None::<&str>)
+                .map_err(|e| format!("Menu item: {}", e))?;
+            remote_menu.0.append(&item).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -442,6 +548,11 @@ pub fn run() {
                     ));
                 }
             }
+
+            let remote_submenu = Submenu::with_items(app, "Remote", true, &[
+                &MenuItem::with_id(app, "ssh_connect", "Connect to Server...", true, None::<&str>)?,
+                &MenuItem::with_id(app, "ssh_disconnect", "Disconnect", true, None::<&str>)?,
+            ])?;
 
             let menu = Menu::with_items(app, &[
                 &Submenu::with_items(app, "kuf", true, &[
@@ -474,17 +585,17 @@ pub fn run() {
                     &MenuItem::with_id(app, "forward", "Forward", true, Some("Alt+ArrowRight"))?,
                     &MenuItem::with_id(app, "parent_dir", "Parent Dir", true, Some("Backspace"))?,
                     &MenuItem::with_id(app, "switch_pane", "Switch Pane", true, Some("Tab"))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, "drive_list", "Drives...", true, Some("Alt+D"))?,
                 ])?,
                 &Submenu::with_items(app, "Bookmarks", true, &[
                     &MenuItem::with_id(app, "bookmark_add", "Add Bookmark", true, Some("CmdOrCtrl+D"))?,
                     &MenuItem::with_id(app, "bookmark_list", "Show Bookmarks", true, Some("CmdOrCtrl+B"))?,
                 ])?,
-                &Submenu::with_items(app, "Remote", true, &[
-                    &MenuItem::with_id(app, "ssh_connect", "Connect to Server...", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "ssh_disconnect", "Disconnect", true, None::<&str>)?,
-                ])?,
+                &remote_submenu,
             ])?;
 
+            app.manage(RemoteSubMenu(remote_submenu));
             app.set_menu(menu)?;
             Ok(())
         })
@@ -518,6 +629,7 @@ pub fn run() {
             open_file,
             open_in_editor,
             read_file_text,
+            list_drives,
             bookmark_list,
             bookmark_add,
             bookmark_remove,
@@ -531,6 +643,7 @@ pub fn run() {
             ssh_list_hosts,
             ssh_connect,
             ssh_disconnect,
+            ssh_list_connections,
             ssh_read_dir,
             ssh_delete_items,
             ssh_rename_item,

@@ -28,8 +28,22 @@ impl client::Handler for SshClientHandler {
 
 pub type SshHandle = client::Handle<SshClientHandler>;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConnectedServer {
+    pub alias: String,
+    pub user: String,
+    pub port: u16,
+}
+
+struct SessionEntry {
+    handle: Arc<SshHandle>,
+    alias: String,
+    user: String,
+    port: u16,
+}
+
 pub struct ConnectionManager {
-    sessions: Mutex<HashMap<String, Arc<SshHandle>>>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
 }
 
 impl ConnectionManager {
@@ -47,8 +61,8 @@ impl ConnectionManager {
         let key = host_key(host);
         {
             let sessions = self.sessions.lock().unwrap();
-            if let Some(handle) = sessions.get(&key) {
-                return Ok(Arc::clone(handle));
+            if let Some(entry) = sessions.get(&key) {
+                return Ok(Arc::clone(&entry.handle));
             }
         }
 
@@ -136,8 +150,14 @@ impl ConnectionManager {
         }
 
         let handle_arc = Arc::new(handle);
+        let entry = SessionEntry {
+            handle: Arc::clone(&handle_arc),
+            alias: host.alias.clone(),
+            user: username,
+            port: host.port,
+        };
         let mut sessions = self.sessions.lock().unwrap();
-        sessions.insert(key, Arc::clone(&handle_arc));
+        sessions.insert(key, entry);
 
         Ok(handle_arc)
     }
@@ -152,7 +172,19 @@ impl ConnectionManager {
     pub fn get(&self, host_alias: &str, port: u16) -> Option<Arc<SshHandle>> {
         let key = format!("{}:{}", host_alias, port);
         let sessions = self.sessions.lock().unwrap();
-        sessions.get(&key).cloned()
+        sessions.get(&key).map(|e| Arc::clone(&e.handle))
+    }
+
+    pub fn list_connections(&self) -> Vec<ConnectedServer> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .values()
+            .map(|e| ConnectedServer {
+                alias: e.alias.clone(),
+                user: e.user.clone(),
+                port: e.port,
+            })
+            .collect()
     }
 }
 

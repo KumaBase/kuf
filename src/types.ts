@@ -102,7 +102,16 @@ export type Command =
   | "open_in_editor"
   | "preview"
   | "ssh_connect"
-  | "ssh_disconnect";
+  | "ssh_disconnect"
+  | "drive_list";
+
+export interface DriveInfo {
+  name: string;
+  path: string;
+  total_bytes: number;
+  available_bytes: number;
+  drive_type: string;
+}
 
 export function formatSize(bytes: number): string {
   if (bytes === 0) return "0";
@@ -152,6 +161,12 @@ export function pathLabel(path: string): string {
 }
 
 // --- Remote path utilities ---
+
+export interface ConnectedServer {
+  alias: string;
+  user: string;
+  port: number;
+}
 
 export interface SshHost {
   alias: string;
