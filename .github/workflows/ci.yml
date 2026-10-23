@@ -66,11 +66,17 @@ jobs:
       - name: Frontend build
         run: npm run build
 
+      - name: Frontend regression tests
+        run: npm test
+
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      - name: Rust regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Native release build
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release
+        run: npm run tauri -- build --no-bundle --ci
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

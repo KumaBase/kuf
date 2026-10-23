@@ -1,6 +1,6 @@
 {
   "productName": "kuf",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "identifier": "com.kuma.kuf",
   "build": {
     "frontendDist": "../dist",
@@ -27,6 +27,9 @@
     }
   },
   "bundle": {
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

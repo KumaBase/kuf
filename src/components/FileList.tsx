@@ -15,9 +15,34 @@ interface FileListProps {
   cursorIndex: number;
   selectedIndices: number[];
   isActive: boolean;
+  matchHighlights?: ReadonlyMap<string, readonly number[]>;
   onClick?: (index: number, e: MouseEvent) => void;
   onDoubleClick?: (index: number) => void;
   onContextMenu?: (index: number, x: number, y: number) => void;
+}
+
+interface HighlightedNameProps {
+  text: string;
+  positions?: readonly number[];
+  offset?: number;
+}
+
+function HighlightedName(props: HighlightedNameProps) {
+  const segments = createMemo(() => {
+    const positions = new Set(props.positions);
+    const result: { text: string; matched: boolean }[] = [];
+    let offset = props.offset ?? 0;
+    // Iterate by code point so a highlight can never split a surrogate pair.
+    for (const character of props.text) {
+      const matched = positions.has(offset) || (character.length === 2 && positions.has(offset + 1));
+      const previous = result[result.length - 1];
+      if (previous?.matched === matched) previous.text += character;
+      else result.push({ text: character, matched });
+      offset += character.length;
+    }
+    return result;
+  });
+  return <For each={segments()}>{(segment) => segment.matched ? <mark class="filter-match">{segment.text}</mark> : segment.text}</For>;
 }
 
 export default function FileList(props: FileListProps) {
@@ -29,6 +54,7 @@ export default function FileList(props: FileListProps) {
   const rh = () => rowHeight();
   const cols = () => settings()?.display.columns ?? ["extension", "size", "date", "permissions"];
   const extVisible = () => cols().includes("extension");
+  const selected = createMemo(() => new Set(props.selectedIndices));
 
   const visibleRange = createMemo(() => {
     const h = rh();
@@ -94,6 +120,10 @@ export default function FileList(props: FileListProps) {
         <For each={visibleIndices()}>
           {(index) => {
             const file = () => props.files[index];
+            const nameEnd = () => extVisible() && file().extension
+              ? file().name.length - file().extension.length - 1
+              : file().name.length;
+            const highlights = () => props.matchHighlights?.get(file().name);
             return (
               <div
                 class="file-row"
@@ -102,7 +132,7 @@ export default function FileList(props: FileListProps) {
                     index === props.cursorIndex && props.isActive,
                   "cursor-inactive":
                     index === props.cursorIndex && !props.isActive,
-                  selected: props.selectedIndices.includes(index),
+                  selected: selected().has(index),
                 }}
                 style={{
                   position: "absolute",
@@ -128,15 +158,13 @@ export default function FileList(props: FileListProps) {
                     "name-symlink": file().is_symlink,
                   }}
                 >
-                  {extVisible() && file().extension
-                    ? file().name.slice(0, file().name.length - file().extension.length - 1)
-                    : file().name}
+                  <HighlightedName text={file().name.slice(0, nameEnd())} positions={highlights()} />
                 </span>
                 <For each={cols()}>
                   {(col) => {
                     switch (col) {
                       case "extension":
-                        return <span class="row-extension">{file().extension ? `.${file().extension}` : ""}</span>;
+                        return <span class="row-extension"><HighlightedName text={file().extension ? `.${file().extension}` : ""} positions={highlights()} offset={file().name.length - file().extension.length - 1} /></span>;
                       case "size":
                         return <span class="row-size">{file().is_dir ? "" : formatSize(file().size)}</span>;
                       case "date":

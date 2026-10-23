@@ -1,7 +1,8 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onMount, onCleanup, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { DriveInfo } from "../types";
 import { formatSize } from "../types";
+import { focusApp } from "../focus";
 
 export default function DriveDialog(props: {
   onClose: () => void;
@@ -23,13 +24,30 @@ export default function DriveDialog(props: {
     }
   });
 
+  onCleanup(() => focusApp());
+
+  let closed = false;
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    props.onClose();
+  }
+
+  function choose(path: string) {
+    if (!path || closed) return;
+    props.onNavigate(path);
+    queueMicrotask(() => close());
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     e.stopPropagation();
     const list = drives();
 
     switch (e.key) {
       case "Escape":
-        props.onClose();
+        e.preventDefault();
+        close();
         break;
       case "ArrowUp":
         e.preventDefault();
@@ -40,11 +58,9 @@ export default function DriveDialog(props: {
         if (cursorIndex() < list.length - 1) setCursorIndex(cursorIndex() + 1);
         break;
       case "Enter": {
+        e.preventDefault();
         const drive = list[cursorIndex()];
-        if (drive) {
-          props.onNavigate(drive.path);
-          props.onClose();
-        }
+        if (drive) choose(drive.path);
         break;
       }
     }
@@ -61,7 +77,7 @@ export default function DriveDialog(props: {
   }
 
   return (
-    <div class="dialog-overlay" onClick={props.onClose}>
+    <div class="dialog-overlay" onClick={close}>
       <div
         class="drive-dialog"
         ref={dialogRef}
@@ -86,10 +102,9 @@ export default function DriveDialog(props: {
                   "drive-row": true,
                   "drive-cursor": index() === cursorIndex(),
                 }}
-                onClick={() => setCursorIndex(index())}
-                onDblClick={() => {
-                  props.onNavigate(drive.path);
-                  props.onClose();
+                onClick={() => {
+                  setCursorIndex(index());
+                  choose(drive.path);
                 }}
               >
                 <span class="drive-icon">💾</span>
@@ -108,8 +123,8 @@ export default function DriveDialog(props: {
           </For>
         </div>
         <div class="drive-footer">
-          <button class="dialog-btn btn-ok" onClick={props.onClose}>
-            Close
+          <button type="button" class="dialog-btn btn-ok" onClick={close}>
+            閉じる
           </button>
         </div>
       </div>

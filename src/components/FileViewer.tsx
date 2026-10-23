@@ -1,6 +1,7 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { focusApp } from "../focus";
 
 const IMAGE_EXTENSIONS = new Set([
   "png",
@@ -28,8 +29,10 @@ export default function FileViewer(props: {
   const [textContent, setTextContent] = createSignal("");
   const imageMode = isImage(props.extension);
   const [imageSrc, setImageSrc] = createSignal("");
+  let overlayRef!: HTMLDivElement;
 
   onMount(async () => {
+    overlayRef?.focus();
     if (imageMode) {
       try {
         const src = convertFileSrc(props.path);
@@ -51,8 +54,19 @@ export default function FileViewer(props: {
     }
   });
 
+  onCleanup(() => focusApp());
+
   return (
-    <div class="dialog-overlay" onClick={props.onClose}>
+    <div
+      class="dialog-overlay"
+      ref={overlayRef}
+      tabindex="-1"
+      onClick={props.onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") { e.preventDefault(); props.onClose(); }
+      }}
+    >
       <div
         class="file-viewer"
         onClick={(e) => e.stopPropagation()}

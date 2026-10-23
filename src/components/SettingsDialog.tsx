@@ -1,12 +1,17 @@
-import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup, createMemo } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../types";
 import {
   settings,
   saveSettings,
   saveKeybinds,
   keybinds,
+  DEFAULT_KEYBINDS,
+  applySettingsToDOM,
 } from "../state";
 import { THEME_NAMES } from "../themes";
+import { COMMAND_CATALOG, COMMAND_GROUPS, commandLabel, formatKeyEvent } from "../commands";
+import { focusApp } from "../focus";
 
 type Tab = "general" | "keymap";
 
@@ -18,7 +23,7 @@ export default function SettingsDialog(props: {
   const [dragCol, setDragCol] = createSignal<string | null>(null);
   let listRef!: HTMLDivElement;
 
-  const COL_LABELS: Record<string, string> = { extension: "Extension", size: "Size", date: "Date", permissions: "Permissions" };
+  const COL_LABELS: Record<string, string> = { extension: "拡張子", size: "サイズ", date: "日付", permissions: "権限" };
 
   function moveColumn(fromId: string, toId: string) {
     const current = [...s().display.columns];
@@ -67,9 +72,10 @@ export default function SettingsDialog(props: {
     setEditSettings({ ...s(), display: { ...s().display, columns: [...s().display.columns, col] } });
   }
 
+  const initialSettings = settings();
   const [editSettings, setEditSettings] = createSignal<AppSettings>(
-    settings() ?? {
-      display: { font_size: 13, row_height: 22, show_hidden: true, theme: "tokyo-night", columns: ["extension", "size", "date", "permissions"], rename_without_extension: false },
+    initialSettings ?? {
+      display: { font_size: 16, row_height: 29, show_hidden: true, theme: "tokyo-night", columns: ["extension", "size", "date", "permissions"], rename_without_extension: false },
       navigation: { left_dir: "", right_dir: "" },
       sort: { dirs_first: true, case_sensitive: false },
       editor: "vim",
@@ -79,43 +85,13 @@ export default function SettingsDialog(props: {
   const [editKeybinds, setEditKeybinds] = createSignal<Record<string, string>>({
     ...keybinds(),
   });
-  const [capturingKey, setCapturingKey] = createSignal<string | null>(null);
-
-  const ALL_COMMANDS = [
-    "cursor_up",
-    "cursor_down",
-    "cursor_top",
-    "cursor_bottom",
-    "enter",
-    "parent_dir",
-    "switch_pane",
-    "toggle_select",
-    "select_all",
-    "refresh",
-    "copy",
-    "move",
-    "delete",
-    "rename",
-    "new_folder",
-    "clear_selection",
-    "bookmark_add",
-    "bookmark_list",
-    "history_back",
-    "history_forward",
-    "left_pane",
-    "right_pane",
-    "sync_to_other",
-    "sync_from_other",
-    "copy_to_other",
-    "move_to_other",
-    "tab_new",
-    "tab_close",
-    "tab_next",
-    "tab_prev",
-    "open_file",
-    "open_in_editor",
-    "preview",
-  ];
+  const [capturing, setCapturing] = createSignal<{
+    command: string;
+    replacing?: string;
+  } | null>(null);
+  const [keyQuery, setKeyQuery] = createSignal("");
+  const [keyConflict, setKeyConflict] = createSignal("");
+  let dialogRef!: HTMLDivElement;
 
   function handleSave() {
     saveSettings(editSettings());
@@ -124,73 +100,128 @@ export default function SettingsDialog(props: {
     props.onClose();
   }
 
-  function formatKeyForCapture(e: KeyboardEvent): string {
-    const parts: string[] = [];
-    if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
-    if (e.altKey) parts.push("Alt");
-    if (e.shiftKey && e.key !== "Shift") parts.push("Shift");
-    // Ignore pure modifier keys
-    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return "";
-    parts.push(e.key);
-    return parts.join("+");
+  function handleCancel() {
+    if (initialSettings) applySettingsToDOM(initialSettings);
+    props.onClose();
   }
 
-  function handleKeyCapture(e: KeyboardEvent, command: string) {
+  function previewSettings(next: AppSettings) {
+    setEditSettings(next);
+    applySettingsToDOM(next);
+  }
+
+  async function browseEditor() {
+    const path = await invoke<string | null>("pick_file", {
+      title: "エディタを選択",
+      filters: [
+        { name: "プログラム", extensions: ["exe", "bat", "cmd", "com"] },
+      ],
+    });
+    if (path) setEditSettings({ ...s(), editor: path });
+  }
+
+  async function browseFolder(side: "left" | "right") {
+    const path = await invoke<string | null>("pick_folder", {
+      title: side === "left" ? "左ペインの起動フォルダ" : "右ペインの起動フォルダ",
+    });
+    if (!path) return;
+    setEditSettings({
+      ...s(),
+      navigation: {
+        ...s().navigation,
+        [side === "left" ? "left_dir" : "right_dir"]: path,
+      },
+    });
+  }
+
+  function keysForCommand(command: string): string[] {
+    return Object.entries(editKeybinds())
+      .filter(([, cmd]) => cmd === command)
+      .map(([key]) => key);
+  }
+
+  function formatKeyForCapture(e: KeyboardEvent): string {
+    return formatKeyEvent(e);
+  }
+
+  function assignKey(command: string, key: string, replacing?: string) {
+    const kb = { ...editKeybinds() };
+    const previous = kb[key];
+    if (replacing) delete kb[replacing];
+    kb[key] = command;
+    setEditKeybinds(kb);
+    if (previous && previous !== command) {
+      setKeyConflict(`「${key}」は「${commandLabel(previous)}」から付け替えました`);
+    } else {
+      setKeyConflict("");
+    }
+  }
+
+  function removeKey(key: string) {
+    const kb = { ...editKeybinds() };
+    delete kb[key];
+    setEditKeybinds(kb);
+  }
+
+  function handleKeyCapture(e: KeyboardEvent) {
+    const cap = capturing();
+    if (!cap) return;
     e.preventDefault();
     e.stopPropagation();
 
     if (e.key === "Escape") {
-      setCapturingKey(null);
+      setCapturing(null);
+      return;
+    }
+    if (e.key === "Backspace" && cap.replacing) {
+      removeKey(cap.replacing);
+      setCapturing(null);
       return;
     }
 
     const key = formatKeyForCapture(e);
     if (!key) return;
-
-    const kb = { ...editKeybinds() };
-    // Remove old mapping for this command
-    for (const [k, v] of Object.entries(kb)) {
-      if (v === command) delete kb[k];
-    }
-    kb[key] = command;
-    setEditKeybinds(kb);
-    setCapturingKey(null);
+    assignKey(cap.command, key, cap.replacing);
+    setCapturing(null);
   }
 
-  function findKeyForCommand(command: string): string {
-    const kb = editKeybinds();
-    for (const [key, cmd] of Object.entries(kb)) {
-      if (cmd === command) return key;
-    }
-    return "";
-  }
+  const filteredCatalog = createMemo(() => {
+    const q = keyQuery().trim().toLowerCase();
+    if (!q) return COMMAND_CATALOG;
+    return COMMAND_CATALOG.filter((c) => {
+      const keys = keysForCommand(c.id).join(" ").toLowerCase();
+      return (
+        c.id.toLowerCase().includes(q) ||
+        c.label.toLowerCase().includes(q) ||
+        c.description.toLowerCase().includes(q) ||
+        keys.includes(q)
+      );
+    });
+  });
 
   function handleResetSettings() {
     invoke<AppSettings>("settings_reset").then((s) => {
       setEditSettings(s);
+      applySettingsToDOM(s);
     });
   }
 
   function handleResetKeybinds() {
     invoke<{ keybind: Record<string, string> }>("keybinds_reset").then((kb) => {
-      if (kb?.keybind) setEditKeybinds(kb.keybind);
+      setEditKeybinds({ ...DEFAULT_KEYBINDS, ...(kb?.keybind ?? {}) });
+      setKeyConflict("");
     });
-  }
-
-  async function invoke<T>(cmd: string): Promise<T> {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<T>(cmd);
   }
 
   const s = editSettings;
 
   onMount(() => {
+    dialogRef?.focus();
     const handler = (e: KeyboardEvent) => {
-      const cap = capturingKey();
-      if (!cap) return;
+      if (!capturing()) return;
       e.preventDefault();
       e.stopPropagation();
-      handleKeyCapture(e, cap);
+      handleKeyCapture(e);
     };
     document.addEventListener("keydown", handler, true);
     onCleanup(() => document.removeEventListener("keydown", handler, true));
@@ -202,20 +233,28 @@ export default function SettingsDialog(props: {
     onCleanup(() => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
+      focusApp();
     });
   });
 
   return (
-    <div class="dialog-overlay" onClick={props.onClose}>
+    <div class="dialog-overlay" onClick={handleCancel}>
       <div
         class="settings-dialog"
+        ref={dialogRef}
+        tabindex="-1"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          if (e.key === "Escape") props.onClose();
+          if (capturing()) return;
+          if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            handleCancel();
+          }
         }}
       >
         <div class="settings-header">
-          <span class="settings-title">Settings</span>
+          <span class="settings-title">設定</span>
         </div>
 
         <div class="settings-tabs">
@@ -226,7 +265,7 @@ export default function SettingsDialog(props: {
             }}
             onClick={() => setTab("general")}
           >
-            General
+            一般
           </button>
           <button
             classList={{
@@ -235,54 +274,60 @@ export default function SettingsDialog(props: {
             }}
             onClick={() => setTab("keymap")}
           >
-            Keymap
+            キーマップ
           </button>
         </div>
 
         <div class="settings-body">
           <Show when={tab() === "general"}>
             <div class="settings-section">
-              <div class="settings-section-title">Display</div>
+              <div class="settings-section-title">表示</div>
               <label class="settings-row">
-                <span class="settings-label">Font Size</span>
-                <input
-                  class="settings-input"
-                  type="number"
-                  min="8"
-                  max="24"
-                  value={s().display.font_size}
-                  onInput={(e) =>
-                    setEditSettings({
-                      ...s(),
-                      display: {
-                        ...s().display,
-                        font_size: Number(e.currentTarget.value),
-                      },
-                    })
-                  }
-                />
+                <span class="settings-label">フォントサイズ</span>
+                <div class="settings-slider">
+                  <input
+                    type="range"
+                    min="10"
+                    max="28"
+                    value={s().display.font_size}
+                    onInput={(e) => {
+                      const font_size = Number(e.currentTarget.value);
+                      previewSettings({
+                        ...s(),
+                        display: {
+                          ...s().display,
+                          font_size,
+                          row_height: font_size + 13,
+                        },
+                      });
+                    }}
+                  />
+                  <span class="settings-slider-value">{s().display.font_size}px</span>
+                </div>
               </label>
               <label class="settings-row">
-                <span class="settings-label">Row Height</span>
-                <input
-                  class="settings-input"
-                  type="number"
-                  min="16"
-                  max="40"
-                  value={s().display.row_height}
-                  onInput={(e) =>
-                    setEditSettings({
-                      ...s(),
-                      display: {
-                        ...s().display,
-                        row_height: Number(e.currentTarget.value),
-                      },
-                    })
-                  }
-                />
+                <span class="settings-label">行の高さ</span>
+                <div class="settings-slider">
+                  <input
+                    type="range"
+                    min="18"
+                    max="48"
+                    value={s().display.row_height}
+                    onInput={(e) =>
+                      previewSettings({
+                        ...s(),
+                        display: {
+                          ...s().display,
+                          row_height: Number(e.currentTarget.value),
+                        },
+                      })
+                    }
+                  />
+                  <span class="settings-slider-value">{s().display.row_height}px</span>
+                </div>
               </label>
               <label class="settings-row">
-                <span class="settings-label">Show Hidden Files</span>
+                <span class="settings-label">隠しファイルを表示</span>
                 <input
                   class="settings-checkbox"
                   type="checkbox"
@@ -299,12 +344,12 @@ export default function SettingsDialog(props: {
                 />
               </label>
               <label class="settings-row">
-                <span class="settings-label">Theme</span>
+                <span class="settings-label">テーマ</span>
                 <select
                   class="settings-input"
                   value={s().display.theme}
                   onChange={(e) =>
-                    setEditSettings({
+                    previewSettings({
                       ...s(),
                       display: {
                         ...s().display,
@@ -321,7 +366,7 @@ export default function SettingsDialog(props: {
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title">Columns</div>
+              <div class="settings-section-title">列</div>
               <div
                 class="column-list"
                 ref={listRef}
@@ -348,7 +393,7 @@ export default function SettingsDialog(props: {
               </div>
               <Show when={s().display.columns.length < 4}>
                 <div class="column-add-row">
-                  <span class="column-add-label">Add:</span>
+                  <span class="column-add-label">追加:</span>
                   <For each={["extension", "size", "date", "permissions"].filter(c => !s().display.columns.includes(c))}>
                     {(col) => (
                       <button
@@ -362,7 +407,7 @@ export default function SettingsDialog(props: {
                 </div>
               </Show>
               <label class="settings-row" style="margin-top: 8px;">
-                <span class="settings-label">Rename Without Extension</span>
+                <span class="settings-label">リネーム時に拡張子を除いて選択</span>
                 <input
                   class="settings-checkbox"
                   type="checkbox"
@@ -381,68 +426,92 @@ export default function SettingsDialog(props: {
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title">Navigation</div>
-              <label class="settings-row">
-                <span class="settings-label">Left Dir</span>
-                <input
-                  class="settings-input"
-                  type="text"
-                  placeholder="Home"
-                  value={s().navigation.left_dir}
-                  onInput={(e) =>
-                    setEditSettings({
-                      ...s(),
-                      navigation: {
-                        ...s().navigation,
-                        left_dir: e.currentTarget.value,
-                      },
-                    })
-                  }
-                />
+              <div class="settings-section-title">起動フォルダ</div>
+              <label class="settings-check">
+                <input type="checkbox" checked={s().navigation.restore_session !== false}
+                  onChange={(e) => setEditSettings({ ...s(), navigation: { ...s().navigation, restore_session: e.currentTarget.checked } })} />
+                起動時に前回の左右の場所とタブを復元する
               </label>
-              <label class="settings-row">
-                <span class="settings-label">Right Dir</span>
-                <input
-                  class="settings-input"
-                  type="text"
-                  placeholder="Home"
-                  value={s().navigation.right_dir}
-                  onInput={(e) =>
-                    setEditSettings({
-                      ...s(),
-                      navigation: {
-                        ...s().navigation,
-                        right_dir: e.currentTarget.value,
-                      },
-                    })
-                  }
-                />
-              </label>
+              <div class="settings-hint">前回の状態がない場合、または復元しない場合は次のフォルダを開きます。</div>
+              <div class="settings-field">
+                <span class="settings-label">左ペイン</span>
+                <div class="settings-path">
+                  <input
+                    class="settings-input settings-input-grow"
+                    type="text"
+                    placeholder="空欄ならホーム"
+                    value={s().navigation.left_dir}
+                    onInput={(e) =>
+                      setEditSettings({
+                        ...s(),
+                        navigation: {
+                          ...s().navigation,
+                          left_dir: e.currentTarget.value,
+                        },
+                      })
+                    }
+                  />
+                  <button type="button" class="settings-browse" onClick={() => browseFolder("left")}>
+                    参照...
+                  </button>
+                </div>
+              </div>
+              <div class="settings-field">
+                <span class="settings-label">右ペイン</span>
+                <div class="settings-path">
+                  <input
+                    class="settings-input settings-input-grow"
+                    type="text"
+                    placeholder="空欄ならホーム"
+                    value={s().navigation.right_dir}
+                    onInput={(e) =>
+                      setEditSettings({
+                        ...s(),
+                        navigation: {
+                          ...s().navigation,
+                          right_dir: e.currentTarget.value,
+                        },
+                      })
+                    }
+                  />
+                  <button type="button" class="settings-browse" onClick={() => browseFolder("right")}>
+                    参照...
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title">Applications</div>
-              <label class="settings-row">
-                <span class="settings-label">Editor</span>
-                <input
-                  class="settings-input"
-                  type="text"
-                  value={s().editor}
-                  placeholder="vim"
-                  onInput={(e) =>
-                    setEditSettings({
-                      ...s(),
-                      editor: e.currentTarget.value,
-                    })
-                  }
-                />
-              </label>
+              <div class="settings-section-title">アプリ</div>
+              <div class="settings-field">
+                <span class="settings-label">エディタ</span>
+                <div class="settings-path">
+                  <input
+                    class="settings-input settings-input-grow"
+                    type="text"
+                    value={s().editor}
+                    placeholder="notepad.exe またはフルパス"
+                    onInput={(e) =>
+                      setEditSettings({
+                        ...s(),
+                        editor: e.currentTarget.value,
+                      })
+                    }
+                  />
+                  <button type="button" class="settings-browse" onClick={browseEditor}>
+                    参照...
+                  </button>
+                </div>
+                <div class="settings-hint">
+                  「参照」から .exe を選べます。コマンド名（notepad など）だけでも指定できます。
+                </div>
+              </div>
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title">Sort</div>
+              <div class="settings-section-title">並び順</div>
               <label class="settings-row">
-                <span class="settings-label">Directories First</span>
+                <span class="settings-label">フォルダを先に表示</span>
                 <input
                   class="settings-checkbox"
                   type="checkbox"
@@ -459,7 +528,7 @@ export default function SettingsDialog(props: {
                 />
               </label>
               <label class="settings-row">
-                <span class="settings-label">Case Sensitive</span>
+                <span class="settings-label">大文字小文字を区別</span>
                 <input
                   class="settings-checkbox"
                   type="checkbox"
@@ -478,9 +547,9 @@ export default function SettingsDialog(props: {
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title">Window</div>
+              <div class="settings-section-title">ウィンドウ</div>
               <label class="settings-row">
-                <span class="settings-label">Startup Size</span>
+                <span class="settings-label">起動時のサイズ</span>
                 <select
                   class="settings-input"
                   value={s().window.mode}
@@ -494,12 +563,12 @@ export default function SettingsDialog(props: {
                     })
                   }
                 >
-                  <option value="remember">Remember last size</option>
-                  <option value="fixed">Fixed size</option>
+                  <option value="remember">前回のサイズを使う</option>
+                  <option value="fixed">固定サイズ</option>
                 </select>
               </label>
               <label class="settings-row">
-                <span class="settings-label">Width</span>
+                <span class="settings-label">幅</span>
                 <input
                   class="settings-input"
                   type="number"
@@ -519,7 +588,7 @@ export default function SettingsDialog(props: {
                 />
               </label>
               <label class="settings-row">
-                <span class="settings-label">Height</span>
+                <span class="settings-label">高さ</span>
                 <input
                   class="settings-input"
                   type="number"
@@ -542,54 +611,124 @@ export default function SettingsDialog(props: {
 
             <div class="settings-section-actions">
               <button class="settings-reset-btn" onClick={handleResetSettings}>
-                Reset to Defaults
+                デフォルトに戻す
               </button>
             </div>
           </Show>
 
           <Show when={tab() === "keymap"}>
+            <div class="keybind-toolbar">
+              <input
+                class="settings-input keybind-search"
+                type="text"
+                placeholder="コマンド名・キーで検索"
+                value={keyQuery()}
+                onInput={(e) => setKeyQuery(e.currentTarget.value)}
+              />
+              <Show when={keyConflict()}>
+                <div class="keybind-conflict">{keyConflict()}</div>
+              </Show>
+              <div class="keybind-hint">
+                デフォルトはあふw寄り（J=ブックマーク、Shift+J=パスジャンプ、L=ドライブ、C/M=相手窓へコピー/移動、Fは検索）。キーをクリックして変更、＋で追加。
+              </div>
+            </div>
             <div class="keybind-list">
-              <For each={ALL_COMMANDS}>
-                {(command) => (
-                  <div class="keybind-row">
-                    <span class="keybind-command">{command}</span>
-                    <Show
-                      when={capturingKey() === command}
-                      fallback={
-                        <button
-                          class="keybind-key-btn"
-                          onClick={() => setCapturingKey(command)}
-                        >
-                          {findKeyForCommand(command) || "(none)"}
-                        </button>
-                      }
-                    >
-                      <button
-                        class="keybind-key-btn capturing"
-                        ref={(el) => el.focus()}
-                      >
-                        Press key...
-                      </button>
+              <For each={[...COMMAND_GROUPS]}>
+                {(group) => {
+                  const items = () =>
+                    filteredCatalog().filter((c) => c.group === group);
+                  return (
+                    <Show when={items().length > 0}>
+                      <div class="keybind-group-title">{group}</div>
+                      <For each={items()}>
+                        {(command) => {
+                          const keys = () => keysForCommand(command.id);
+                          const cap = () => capturing();
+                          return (
+                            <div class="keybind-row">
+                              <div class="keybind-meta">
+                                <span class="keybind-command">{command.label}</span>
+                                <span class="keybind-desc">{command.description}</span>
+                              </div>
+                              <div class="keybind-keys">
+                                <For each={keys()}>
+                                  {(key) => (
+                                    <Show
+                                      when={
+                                        cap()?.command === command.id &&
+                                        cap()?.replacing === key
+                                      }
+                                      fallback={
+                                        <button
+                                          class="keybind-chip"
+                                          title="クリックして変更"
+                                          onClick={() =>
+                                            setCapturing({
+                                              command: command.id,
+                                              replacing: key,
+                                            })
+                                          }
+                                        >
+                                          {key === " " ? "Space" : key}
+                                          <span
+                                            class="keybind-chip-x"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              removeKey(key);
+                                            }}
+                                          >
+                                            ×
+                                          </span>
+                                        </button>
+                                      }
+                                    >
+                                      <button class="keybind-chip capturing">入力中...</button>
+                                    </Show>
+                                  )}
+                                </For>
+                                <Show
+                                  when={
+                                    cap()?.command === command.id && !cap()?.replacing
+                                  }
+                                  fallback={
+                                    <button
+                                      class="keybind-add"
+                                      title="キーを追加"
+                                      onClick={() =>
+                                        setCapturing({ command: command.id })
+                                      }
+                                    >
+                                      ＋
+                                    </button>
+                                  }
+                                >
+                                  <button class="keybind-chip capturing">入力中...</button>
+                                </Show>
+                              </div>
+                            </div>
+                          );
+                        }}
+                      </For>
                     </Show>
-                  </div>
-                )}
+                  );
+                }}
               </For>
             </div>
 
             <div class="settings-section-actions">
               <button class="settings-reset-btn" onClick={handleResetKeybinds}>
-                Reset to Defaults
+                デフォルトに戻す
               </button>
             </div>
           </Show>
         </div>
 
         <div class="settings-footer">
-          <button class="dialog-btn" onClick={props.onClose}>
-            Cancel
+          <button class="dialog-btn" onClick={handleCancel}>
+            キャンセル
           </button>
           <button class="dialog-btn btn-ok" onClick={handleSave}>
-            Save
+            保存
           </button>
         </div>
       </div>

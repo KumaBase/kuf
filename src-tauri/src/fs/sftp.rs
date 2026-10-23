@@ -91,12 +91,6 @@ impl SftpFs {
             });
         }
 
-        files.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
-
         files.insert(
             0,
             FileInfo {
@@ -117,9 +111,13 @@ impl SftpFs {
     pub async fn delete_items(
         handle: &SshHandle,
         paths: &[PathBuf],
+        op: Option<&crate::operation::Operation>,
+        app: &tauri::AppHandle,
     ) -> Result<(), String> {
         let sftp = Self::create_sftp(handle).await?;
-        for path in paths {
+        if let Some(op) = op { op.progress(app, 0, paths.len()); }
+        for (i, path) in paths.iter().enumerate() {
+            if let Some(op) = op { op.check()?; }
             let path_str = path.to_string_lossy().to_string();
             let metadata = sftp
                 .metadata(&path_str)
@@ -132,6 +130,7 @@ impl SftpFs {
                     .await
                     .map_err(|e| format!("Delete {}: {}", path.display(), e))?;
             }
+            if let Some(op) = op { op.progress(app, i + 1, paths.len()); }
         }
         Ok(())
     }
@@ -156,11 +155,35 @@ impl SftpFs {
         path: &Path,
         name: &str,
     ) -> Result<(), String> {
+        crate::fs::local::validate_item_name(name)?;
         let sftp = Self::create_sftp(handle).await?;
         let dir_path = path.join(name);
         sftp.create_dir(dir_path.to_string_lossy().to_string())
             .await
             .map_err(|e| format!("Create dir failed: {}", e))
+    }
+
+    pub async fn create_file(
+        handle: &SshHandle,
+        path: &Path,
+        name: &str,
+    ) -> Result<(), String> {
+        crate::fs::local::validate_item_name(name)?;
+        let sftp = Self::create_sftp(handle).await?;
+        let file_path = path.join(name);
+        let path_str = file_path.to_string_lossy().to_string();
+        if sftp
+            .try_exists(path_str.clone())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(format!("Already exists: {}", name));
+        }
+        let _ = sftp
+            .create(path_str)
+            .await
+            .map_err(|e| format!("Create file failed: {}", e))?;
+        Ok(())
     }
 
     pub async fn path_exists(
