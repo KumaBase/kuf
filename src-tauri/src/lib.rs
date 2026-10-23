@@ -3,6 +3,8 @@ mod config;
 mod fs;
 mod operation;
 mod ssh;
+#[cfg(windows)]
+mod terminal;
 mod workspace;
 mod watcher;
 mod trash;
@@ -345,9 +347,7 @@ async fn open_terminal(path: String) -> Result<(), String> {
     background::run(move || {
         #[cfg(windows)]
         {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", "cmd", "/K", "cd", "/D", &path])
-                .spawn()
+            terminal::open(Path::new(&path))
                 .map_err(|e| format!("Failed to open terminal: {}", e))?;
             return Ok(());
         }
@@ -832,6 +832,7 @@ async fn ssh_copy_to_remote(
         Path::new(&remote_path),
         &handle,
         overwrite,
+        false,
         dest_names.as_deref(),
         op.as_ref(),
         &app,
@@ -862,6 +863,7 @@ async fn ssh_copy_from_remote(
         Path::new(&local_path),
         &handle,
         overwrite,
+        false,
         dest_names.as_deref(),
         op.as_ref(),
         &app,
@@ -892,13 +894,16 @@ async fn ssh_move_to_remote(
         Path::new(&remote_path),
         &handle,
         overwrite,
+        true,
         dest_names.as_deref(),
         op.as_ref(),
         &app,
     )
     .await?;
-    let local = LocalFs;
-    local.delete_items(&local_path_bufs)?;
+    if let Some(op) = &op {
+        op.check()?;
+    }
+    background::run(move || LocalFs.delete_items(&local_path_bufs)).await?;
     Ok(())
 }
 
@@ -925,6 +930,7 @@ async fn ssh_move_from_remote(
         Path::new(&local_path),
         &handle,
         overwrite,
+        true,
         dest_names.as_deref(),
         op.as_ref(),
         &app,

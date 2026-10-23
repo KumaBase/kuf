@@ -1,6 +1,6 @@
+use crate::format_local_permissions;
 use crate::fs::FileSystem;
 use crate::FileInfo;
-use crate::format_local_permissions;
 use chrono::{DateTime, Local};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,7 @@ impl FileSystem for LocalFs {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let is_symlink = link_metadata.is_symlink()
-                || link_metadata.file_type().is_symlink();
+            let is_symlink = link_metadata.is_symlink() || link_metadata.file_type().is_symlink();
 
             let resolved = if is_symlink {
                 fs::metadata(entry.path()).ok()
@@ -98,7 +97,7 @@ impl FileSystem for LocalFs {
         for (i, src) in sources.iter().enumerate() {
             let file_name = dest_name_for(src, i, dest_names)?;
             let dest_item = dest.join(&file_name);
-            if would_copy_into_self(src, &dest_item) {
+            if would_copy_into_self(src, &dest_item)? {
                 return Err(format!("Cannot copy '{}' into itself", src.display()));
             }
             if dest_item.exists() && !overwrite {
@@ -126,7 +125,7 @@ impl FileSystem for LocalFs {
         for (i, src) in sources.iter().enumerate() {
             let file_name = dest_name_for(src, i, dest_names)?;
             let dest_item = dest.join(&file_name);
-            if would_copy_into_self(src, &dest_item) {
+            if would_copy_into_self(src, &dest_item)? {
                 return Err(format!("Cannot move '{}' into itself", src.display()));
             }
             if dest_item.exists() && !overwrite {
@@ -231,7 +230,7 @@ fn is_symlink_meta(meta: &fs::Metadata) -> bool {
     meta.is_symlink() || meta.file_type().is_symlink()
 }
 
-fn would_copy_into_self(src: &Path, dest_item: &Path) -> bool {
+fn would_copy_into_self(src: &Path, dest_item: &Path) -> Result<bool, String> {
     let src_c = fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
     let dest_c = if dest_item.exists() {
         fs::canonicalize(dest_item).unwrap_or_else(|_| dest_item.to_path_buf())
@@ -242,20 +241,82 @@ fn would_copy_into_self(src: &Path, dest_item: &Path) -> bool {
         dest_item.to_path_buf()
     };
     if dest_c == src_c {
-        return src_c.is_dir();
+        return Ok(true);
     }
-    src_c.is_dir() && dest_c.starts_with(&src_c)
+    if src_c.is_dir() && dest_c.starts_with(&src_c) {
+        return Ok(true);
+    }
+    if dest_item.exists() {
+        return same_file(src, dest_item).map_err(|e| {
+            format!(
+                "Cannot verify copy/move target '{}': {}",
+                dest_item.display(),
+                e
+            )
+        });
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn same_file(src: &Path, dest: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let source = fs::metadata(src)?;
+    let target = fs::metadata(dest)?;
+    Ok(source.dev() == target.dev() && source.ino() == target.ino())
+}
+
+#[cfg(windows)]
+fn same_file(src: &Path, dest: &Path) -> std::io::Result<bool> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+
+    fn identity(path: &Path) -> std::io::Result<(u32, u32, u32)> {
+        // Query identity without read/write access or excluding other processes.
+        let file = fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // The owned File keeps the handle valid throughout the synchronous call.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(std::io::Error::other)?;
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+
+    Ok(identity(src)? == identity(dest)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file(_src: &Path, _dest: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 fn copy_entry(src: &Path, dest: &Path) -> Result<(), String> {
-    let link_meta = fs::symlink_metadata(src)
-        .map_err(|e| format!("Stat failed: {}: {}", src.display(), e))?;
+    let link_meta =
+        fs::symlink_metadata(src).map_err(|e| format!("Stat failed: {}: {}", src.display(), e))?;
     if is_symlink_meta(&link_meta) || link_meta.is_dir() {
         copy_dir_recursive(src, dest)
     } else {
-        fs::copy(src, dest)
-            .map(|_| ())
-            .map_err(|e| format!("Copy failed: {} -> {}: {}", src.display(), dest.display(), e))
+        // Directory merging can also encounter a hard link back to a source file.
+        if would_copy_into_self(src, dest)? {
+            return Err(format!("Cannot copy '{}' into itself", src.display()));
+        }
+        fs::copy(src, dest).map(|_| ()).map_err(|e| {
+            format!(
+                "Copy failed: {} -> {}: {}",
+                src.display(),
+                dest.display(),
+                e
+            )
+        })
     }
 }
 
@@ -272,11 +333,9 @@ fn remove_entry(path: &Path) -> Result<(), String> {
                 .map_err(|e| format!("Delete link failed: {}: {}", path.display(), e))
         }
     } else if path.is_dir() {
-        fs::remove_dir_all(path)
-            .map_err(|e| format!("Delete failed: {}: {}", path.display(), e))
+        fs::remove_dir_all(path).map_err(|e| format!("Delete failed: {}: {}", path.display(), e))
     } else {
-        fs::remove_file(path)
-            .map_err(|e| format!("Delete failed: {}: {}", path.display(), e))
+        fs::remove_file(path).map_err(|e| format!("Delete failed: {}: {}", path.display(), e))
     }
 }
 
@@ -316,8 +375,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
         if is_link || src_item.is_dir() {
             copy_dir_recursive(&src_item, &dest_item)?;
         } else {
-            fs::copy(&src_item, &dest_item)
-                .map_err(|e| format!("Copy failed: {}: {}", src_item.display(), e))?;
+            copy_entry(&src_item, &dest_item)?;
         }
     }
     Ok(())
