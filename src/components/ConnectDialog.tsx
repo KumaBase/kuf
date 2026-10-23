@@ -1,6 +1,7 @@
-import { createSignal, For, Show, onMount } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { SshHost } from "../types";
+import { focusApp } from "../focus";
 
 interface ConnectDialogProps {
   onClose: () => void;
@@ -20,6 +21,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
   const [manualUser, setManualUser] = createSignal("");
   const [manualPort, setManualPort] = createSignal(22);
   const [manualPath, setManualPath] = createSignal("/");
+  let dialogRef!: HTMLDivElement;
 
   // Password auth
   const [showPassword, setShowPassword] = createSignal(false);
@@ -36,6 +38,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
   } | null>(null);
 
   onMount(async () => {
+    dialogRef?.focus();
     try {
       const list = await invoke<SshHost[]>("ssh_list_hosts");
       setHosts(list);
@@ -44,6 +47,8 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     }
     setLoading(false);
   });
+
+  onCleanup(() => focusApp());
 
   async function doConnect(
     host: string,
@@ -156,7 +161,9 @@ export default function ConnectDialog(props: ConnectDialogProps) {
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    e.stopPropagation();
     if (e.key === "Escape") {
+      e.preventDefault();
       props.onClose();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -179,6 +186,8 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     <div class="dialog-overlay" onClick={props.onClose}>
       <div
         class="connect-dialog"
+        ref={dialogRef}
+        tabindex="-1"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >

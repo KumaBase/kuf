@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+dist-app/
+.test-run/
 
 # Rust/Cargo
 src-tauri/target/

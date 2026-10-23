@@ -62,5 +62,11 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: kuf ${{ github.ref_name }}
-          releaseBody: Automated release for ${{ github.ref_name }}
+          releaseBody: |
+            Release notes and download information:
+            https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releases/${{ github.ref_name }}.md
+
+            Windows x64 / macOS Apple Silicon / Linux x64
+          releaseDraft: false
+          prerelease: false
           args: ${{ matrix.args }}

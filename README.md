@@ -2,12 +2,12 @@
 
 Dual-pane file manager built with Tauri 2.0 + SolidJS.
 
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![version](https://img.shields.io/badge/version-0.2.0-blue)
 
 ## Requirements
 
 - **Node.js** >= 18
-- **Rust** >= 1.70 (install via [rustup](https://rustup.rs))
+- **Rust** stable (install via [rustup](https://rustup.rs); CI uses the stable toolchain)
 - **System WebView** (ships with the OS on all platforms)
 
 ### Platform-specific
@@ -52,8 +52,8 @@ npx tauri build
 | Platform | Output |
 |----------|--------|
 | macOS    | `src-tauri/target/release/bundle/macos/kuf.app` |
-| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.1.0_x64_en-US.msi` |
-| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.1.0_amd64.deb` |
+| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.2.0_x64_en-US.msi` |
+| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.2.0_amd64.deb` |
 
 ## Type Check
 
@@ -96,16 +96,26 @@ kuf/
 | F5          | Copy              |
 | F6          | Move              |
 | F7          | New folder        |
-| F8 / Delete | Delete            |
+| F8 / Delete | Recycle locally / delete remotely |
 | Space       | Toggle select     |
 | Ctrl+A      | Select all        |
 | Ctrl+R      | Refresh           |
+| / or Ctrl+F | Filter the current pane by name |
 | Ctrl+D      | Add bookmark      |
 | Alt+←/→     | History back/fwd  |
 | Ctrl+T/W    | New/Close tab     |
-| Escape      | Clear selection   |
+| Escape      | Clear filter, then selection |
 
 Keybindings can be customized from Settings (Ctrl+,) > Keymap.
+
+## Everyday use
+
+- Filter with ranked fuzzy matching (`usrctrl` → `UserController.ts`), offline Migemo (`nihon` → `日本`), or multiple terms (`siryou pdf`). Matches are highlighted. Toggle **あいまい / 部分一致** for literal matching; wildcards (`*.txt`) retain their usual behavior. Enter returns to the list; Escape clears the filter. File operations target only visible items in the current folder.
+- Use the **作業セット** menu to save and restore both panes and tabs by name. The previous session is restored on startup by default; this can be disabled in navigation settings.
+- Visible local folders update automatically when files change. Refresh waits while file operations or navigation are running. SFTP uses manual refresh; network shares depend on OS notifications.
+- Local Delete/F8 moves items to the OS trash. Windows supports fixed local drives and refuses unsupported locations without a permanent-delete fallback. Remote deletion remains permanent and requires confirmation.
+
+See [使い方と検証結果](docs/usability.md) for details and limitations.
 
 ## Configuration
 
@@ -119,6 +129,7 @@ Config files are stored in the platform-specific config directory:
 - `settings.toml` — Display, navigation, sort, editor settings
 - `keybind.toml` — Custom key bindings
 - `bookmarks.toml` — Saved bookmarks
+- `workspaces.json` — Named workspaces and the previous session (paths, tabs and active pane)
 
 ## Tech Stack
 

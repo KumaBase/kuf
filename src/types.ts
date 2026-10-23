@@ -32,6 +32,17 @@ export interface TabSnapshot {
   activeSide: Side;
 }
 
+export interface WorkspaceSnapshot {
+  tabs: { left_path: string; right_path: string; active_side: Side }[];
+  active_index: number;
+}
+export interface NamedWorkspace { name: string; snapshot: WorkspaceSnapshot; }
+export interface WorkspaceData {
+  version: number;
+  last_session: WorkspaceSnapshot | null;
+  workspaces: NamedWorkspace[];
+}
+
 export interface DisplaySettings {
   font_size: number;
   row_height: number;
@@ -44,6 +55,7 @@ export interface DisplaySettings {
 export interface NavigationSettings {
   left_dir: string;
   right_dir: string;
+  restore_session?: boolean;
 }
 
 export interface SortSettings {
@@ -74,6 +86,7 @@ export type Command =
   | "cursor_page_down"
   | "enter"
   | "parent_dir"
+  | "go_root"
   | "switch_pane"
   | "toggle_select"
   | "select_all"
@@ -103,7 +116,21 @@ export type Command =
   | "preview"
   | "ssh_connect"
   | "ssh_disconnect"
-  | "drive_list";
+  | "drive_list"
+  | "copy_as"
+  | "move_as"
+  | "goto_path"
+  | "go_home"
+  | "copy_path"
+  | "copy_name"
+  | "new_file"
+  | "invert_selection"
+  | "swap_panes"
+  | "open_terminal"
+  | "select_same_ext"
+  | "filter"
+  | "workspace_save"
+  | "workspace_list";
 
 export interface DriveInfo {
   name: string;
@@ -122,6 +149,10 @@ export function formatSize(bytes: number): string {
   return `${value.toFixed(1)}${units[i]}`;
 }
 
+function isWindowsLocalPath(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:$/.test(path) || path.startsWith("\\\\");
+}
+
 export function joinPath(base: string, name: string): string {
   if (isRemotePath(base)) {
     const parsed = parseRemotePath(base);
@@ -130,6 +161,10 @@ export function joinPath(base: string, name: string): string {
       ? parsed.remotePath + name
       : parsed.remotePath + "/" + name;
     return buildRemotePath(parsed.host, parsed.user, parsed.port, newPath);
+  }
+  if (isWindowsLocalPath(base) || base.includes("\\")) {
+    const trimmed = base.replace(/[\\/]+$/, "");
+    return `${trimmed}\\${name}`;
   }
   if (base.endsWith("/")) return base + name;
   return base + "/" + name;
@@ -145,6 +180,21 @@ export function parentPath(path: string): string {
     const newRemote = lastSlash <= 0 ? "/" : normalized.substring(0, lastSlash);
     return buildRemotePath(parsed.host, parsed.user, parsed.port, newRemote);
   }
+  if (isWindowsLocalPath(path) || path.includes("\\")) {
+    const normalized = path.replace(/\//g, "\\").replace(/\\+$/, "");
+    if (/^[A-Za-z]:$/.test(normalized)) return normalized + "\\";
+    const lastSlash = normalized.lastIndexOf("\\");
+    if (lastSlash <= 2 && /^[A-Za-z]:/.test(normalized)) {
+      return normalized.slice(0, 2) + "\\";
+    }
+    if (normalized.startsWith("\\\\")) {
+      const parts = normalized.split("\\").filter(Boolean);
+      if (parts.length <= 2) return path;
+      return "\\\\" + parts.slice(0, -1).join("\\");
+    }
+    if (lastSlash <= 0) return normalized;
+    return normalized.substring(0, lastSlash);
+  }
   const normalized = path.replace(/\/+$/, "");
   if (normalized === "" || normalized === "/") return "/";
   const lastSlash = normalized.lastIndexOf("/");
@@ -152,12 +202,61 @@ export function parentPath(path: string): string {
   return normalized.substring(0, lastSlash);
 }
 
+export function rootPath(path: string): string {
+  if (isRemotePath(path)) {
+    const parsed = parseRemotePath(path);
+    if (!parsed) return path;
+    return buildRemotePath(parsed.host, parsed.user, parsed.port, "/");
+  }
+  if (isWindowsLocalPath(path) || path.includes("\\")) {
+    const normalized = path.replace(/\//g, "\\");
+    if (normalized.startsWith("\\\\")) {
+      const parts = normalized.split("\\").filter(Boolean);
+      if (parts.length >= 2) return `\\\\${parts[0]}\\${parts[1]}`;
+      return path;
+    }
+    const drive = normalized.match(/^([A-Za-z]:)/);
+    if (drive) return `${drive[1]}\\`;
+  }
+  return "/";
+}
+
+export function baseName(path: string): string {
+  if (isRemotePath(path)) {
+    const parsed = parseRemotePath(path);
+    const remote = (parsed?.remotePath ?? path).replace(/\/+$/, "");
+    const lastSlash = remote.lastIndexOf("/");
+    return lastSlash >= 0 ? remote.substring(lastSlash + 1) : remote;
+  }
+  const normalized = path.replace(/[\\/]+$/, "");
+  const lastSlash = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  return lastSlash >= 0 ? normalized.substring(lastSlash + 1) : normalized;
+}
+
 export function pathLabel(path: string): string {
   if (!path) return "...";
+  if (isWindowsLocalPath(path)) {
+    const normalized = path.replace(/\//g, "\\").replace(/\\+$/, "");
+    if (/^[A-Za-z]:$/.test(normalized)) return normalized + "\\";
+    const lastSlash = normalized.lastIndexOf("\\");
+    return lastSlash >= 0 ? normalized.substring(lastSlash + 1) : normalized;
+  }
   const normalized = path.replace(/\/+$/, "");
   if (normalized === "" || normalized === "/") return "/";
   const lastSlash = normalized.lastIndexOf("/");
   return normalized.substring(lastSlash + 1);
+}
+
+export function sortFiles(files: FileInfo[], dirsFirst: boolean, caseSensitive: boolean): FileInfo[] {
+  const parent = files.filter((f) => f.name === "..");
+  const rest = files.filter((f) => f.name !== "..").map((file) => ({
+    file, key: caseSensitive ? file.name : file.name.toLowerCase(),
+  }));
+  rest.sort((a, b) => {
+    if (dirsFirst && a.file.is_dir !== b.file.is_dir) return a.file.is_dir ? -1 : 1;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+  return [...parent, ...rest.map(({ file }) => file)];
 }
 
 // --- Remote path utilities ---

@@ -1,10 +1,13 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { focusApp } from "../focus";
 
 interface DialogProps {
   type: "confirm" | "input" | "message";
   title: string;
   message: string;
   defaultValue?: string;
+  selectStem?: boolean;
+  okLabel?: string;
   onOk: (value?: string) => void;
   onCancel: () => void;
 }
@@ -13,22 +16,38 @@ export default function Dialog(props: DialogProps) {
   const [inputValue, setInputValue] = createSignal(props.defaultValue || "");
 
   let inputRef!: HTMLInputElement;
+  let overlayRef!: HTMLDivElement;
 
   onMount(() => {
-    if (props.type === "input") {
-      setTimeout(() => inputRef?.focus(), 0);
-    }
+    requestAnimationFrame(() => {
+      if (props.type === "input") {
+        inputRef?.focus();
+        if (!inputRef) return;
+        const value = inputRef.value;
+        if (props.selectStem) {
+          const dot = value.lastIndexOf(".");
+          if (dot > 0) inputRef.setSelectionRange(0, dot);
+          else inputRef.select();
+        } else {
+          inputRef.select();
+        }
+      } else {
+        overlayRef?.focus();
+      }
+    });
   });
 
   onCleanup(() => {
-    document.querySelector<HTMLElement>(".app")?.focus();
+    focusApp();
   });
 
   function handleKeyDown(e: KeyboardEvent) {
     e.stopPropagation();
     if (e.key === "Escape") {
+      e.preventDefault();
       props.onCancel();
     } else if (e.key === "Enter") {
+      e.preventDefault();
       if (props.type === "input") {
         props.onOk(inputValue());
       } else if (props.type === "confirm") {
@@ -40,7 +59,12 @@ export default function Dialog(props: DialogProps) {
   }
 
   return (
-    <div class="dialog-overlay" onKeyDown={handleKeyDown}>
+    <div
+      class="dialog-overlay"
+      ref={overlayRef}
+      tabindex="-1"
+      onKeyDown={handleKeyDown}
+    >
       <div class="dialog-box">
         <div class="dialog-title">{props.title}</div>
         <div class="dialog-message">{props.message}</div>
@@ -55,7 +79,7 @@ export default function Dialog(props: DialogProps) {
         <div class="dialog-buttons">
           <Show when={props.type !== "message"}>
             <button class="dialog-btn btn-cancel" onClick={props.onCancel}>
-              Cancel
+              キャンセル
             </button>
           </Show>
           <button
@@ -65,8 +89,8 @@ export default function Dialog(props: DialogProps) {
               else props.onOk();
             }}
           >
-            <Show when={props.type === "confirm"} fallback="OK">
-              OK
+            <Show when={props.type === "confirm"} fallback={props.okLabel || "OK"}>
+              {props.okLabel || "OK"}
             </Show>
           </button>
         </div>

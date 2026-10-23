@@ -1,5 +1,7 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onMount, onCleanup, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { focusApp } from "../focus";
+import { baseName } from "../types";
 
 export default function BookmarkDialog(props: {
   onClose: () => void;
@@ -10,6 +12,7 @@ export default function BookmarkDialog(props: {
   const [cursorIndex, setCursorIndex] = createSignal(0);
 
   let dialogRef!: HTMLDivElement;
+  let closed = false;
 
   onMount(async () => {
     dialogRef.focus();
@@ -20,6 +23,21 @@ export default function BookmarkDialog(props: {
       console.error("Failed to load bookmarks:", e);
     }
   });
+
+  onCleanup(() => focusApp());
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    props.onClose();
+  }
+
+  function choose(path: string) {
+    if (!path || closed) return;
+    props.onNavigate(path);
+    // Close after this key/click finishes so Enter is not handled as "open folder".
+    queueMicrotask(() => close());
+  }
 
   function removeSelected() {
     const list = bookmarks();
@@ -35,13 +53,31 @@ export default function BookmarkDialog(props: {
     }
   }
 
+  function jumpByLetter(letter: string) {
+    const list = bookmarks();
+    if (list.length === 0) return;
+    const ch = letter.toLowerCase();
+    const matches = list
+      .map((path, i) => ({ path, i }))
+      .filter(({ path }) => baseName(path).toLowerCase().startsWith(ch));
+    if (matches.length === 0) return;
+    if (matches.length === 1) {
+      setCursorIndex(matches[0].i);
+      choose(matches[0].path);
+      return;
+    }
+    const next = matches.find(({ i }) => i > cursorIndex()) ?? matches[0];
+    setCursorIndex(next.i);
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     e.stopPropagation();
     const list = bookmarks();
 
     switch (e.key) {
       case "Escape":
-        props.onClose();
+        e.preventDefault();
+        close();
         break;
       case "ArrowUp":
         e.preventDefault();
@@ -52,21 +88,26 @@ export default function BookmarkDialog(props: {
         if (cursorIndex() < list.length - 1) setCursorIndex(cursorIndex() + 1);
         break;
       case "Enter": {
+        e.preventDefault();
         const path = list[cursorIndex()];
-        if (path) {
-          props.onNavigate(path);
-          props.onClose();
-        }
+        if (path) choose(path);
         break;
       }
       case "Delete":
+        e.preventDefault();
         removeSelected();
+        break;
+      default:
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          jumpByLetter(e.key);
+        }
         break;
     }
   }
 
   return (
-    <div class="dialog-overlay" onClick={props.onClose}>
+    <div class="dialog-overlay" onClick={close}>
       <div
         class="bookmark-dialog"
         ref={dialogRef}
@@ -75,11 +116,11 @@ export default function BookmarkDialog(props: {
         onKeyDown={handleKeyDown}
       >
         <div class="bookmark-header">
-          <span class="bookmark-title">Bookmarks</span>
+          <span class="bookmark-title">ブックマーク</span>
         </div>
         <div class="bookmark-body">
           <Show when={bookmarks().length === 0}>
-            <div class="bookmark-empty">No bookmarks</div>
+            <div class="bookmark-empty">登録がありません。Ctrl+D で追加できます。</div>
           </Show>
           <For each={bookmarks()}>
             {(path, index) => (
@@ -88,23 +129,23 @@ export default function BookmarkDialog(props: {
                   "bookmark-row": true,
                   "bookmark-cursor": index() === cursorIndex(),
                 }}
-                onClick={() => setCursorIndex(index())}
-                onDblClick={() => {
-                  props.onNavigate(path);
-                  props.onClose();
+                onClick={() => {
+                  setCursorIndex(index());
+                  choose(path);
                 }}
               >
+                <span class="bookmark-name">{baseName(path) || path}</span>
                 <span class="bookmark-path">{path}</span>
               </div>
             )}
           </For>
         </div>
         <div class="bookmark-footer">
-          <button class="dialog-btn" onClick={removeSelected}>
-            Remove
+          <button type="button" class="dialog-btn" onClick={removeSelected}>
+            削除
           </button>
-          <button class="dialog-btn btn-ok" onClick={props.onClose}>
-            Close
+          <button type="button" class="dialog-btn btn-ok" onClick={close}>
+            閉じる
           </button>
         </div>
       </div>
