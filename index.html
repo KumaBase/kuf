@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>kuf</title>
+    <!-- Match the native background before the application stylesheet loads. -->
+    <style>
+      html, body {
+        margin: 0;
+        background: var(--bg-primary, #1a1b26);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
