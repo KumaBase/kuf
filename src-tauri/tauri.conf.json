@@ -1,6 +1,6 @@
 {
   "productName": "kuf",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.kuma.kuf",
   "build": {
     "frontendDist": "../dist",
@@ -12,6 +12,7 @@
     "windows": [
       {
         "title": "kuf",
+        "backgroundColor": "#1a1b26",
         "width": 1200,
         "height": 800
       }
