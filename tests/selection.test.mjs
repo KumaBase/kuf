@@ -9,6 +9,20 @@ function paneRoot(t) {
   return api.createRoot((dispose) => { t.after(dispose); return api.createPaneState(); });
 }
 
+test("selected names preserve literal Unix backslashes for single and multiple entries", async (t) => {
+  const pane = paneRoot(t);
+  globalThis.__kufInvoke = async () => [entry("..", { is_dir: true }), entry("report\\draft.txt"), entry("次の資料.txt")];
+  await pane.navigateTo("/work");
+  pane.setCursorToFile("report\\draft.txt");
+  assert.deepEqual(pane.getSelectedNames(), ["report\\draft.txt"]);
+  assert.deepEqual(pane.getSelectedPaths(), ["/work/report\\draft.txt"]);
+  pane.selectAll();
+  assert.deepEqual(new Set(pane.getSelectedNames()), new Set(["report\\draft.txt", "次の資料.txt"]));
+  pane.clearSelection();
+  pane.setCursorToFile("..");
+  assert.deepEqual(pane.getSelectedNames(), []);
+});
+
 test("range selection extends and shrinks from one anchor and never selects the parent", async (t) => {
   const pane = paneRoot(t);
   globalThis.__kufInvoke = async () => [entry("..", { is_dir: true }), entry("a"), entry("b"), entry("c")];

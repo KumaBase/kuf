@@ -1,4 +1,4 @@
-import type { FileInfo } from "./types";
+import type { FileInfo, PaneState } from "./types";
 
 export interface RenamePlanItem { from: string; to: string; }
 export interface BatchRenameResult {
@@ -15,6 +15,28 @@ export const DEFAULT_RENAME_OPTIONS: RenameOptions = {
 };
 export interface RenamePreviewRow extends RenamePlanItem { changed: boolean; error: string; }
 export interface RenamePreview { rows: RenamePreviewRow[]; plan: RenamePlanItem[]; errors: string[]; }
+
+export interface RenameRequestSnapshot {
+  directory: string;
+  files: FileInfo[];
+  existingFiles: FileInfo[];
+  selectedIndices: number[];
+  cursorIndex: number;
+}
+
+export function captureRenameRequest(state: Pick<PaneState, "path" | "files" | "selectedIndices" | "cursorIndex">): RenameRequestSnapshot {
+  // Copy entry values as well as arrays: the live Solid store can be refreshed
+  // while the user edits the preview, even when all modal commands are blocked.
+  const existingFiles = state.files.map((file) => ({ ...file }));
+  const selectedIndices = [...state.selectedIndices];
+  const cursorIndex = state.cursorIndex;
+  const indices = selectedIndices.length ? selectedIndices : [cursorIndex];
+  const files = indices.flatMap((index) => {
+    const file = existingFiles[index];
+    return file && file.name !== ".." ? [{ ...file }] : [];
+  });
+  return { directory: state.path, files, existingFiles, selectedIndices, cursorIndex };
+}
 
 function splitName(file: FileInfo): [string, string] {
   if (file.is_dir) return [file.name, ""];

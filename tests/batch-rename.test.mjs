@@ -42,3 +42,36 @@ test("unchanged plans remain no-ops and malformed sequence values are rejected",
   assert.ok(api.buildRenamePreview(files, files, options({ mode: "sequence", start: Number.NaN })).errors.length);
   assert.ok(api.buildRenamePreview(files, files, options({ mode: "sequence", step: 0 })).errors.length);
 });
+
+test("a selected source disappearing during refresh never substitutes the new cursor item in the rename plan", async (t) => {
+  const pane = api.createRoot((dispose) => { t.after(dispose); return api.createPaneState(); });
+  globalThis.__kufInvoke = async () => [entry("..", { is_dir: true }), entry("old.JPG"), entry("unrelated.txt")];
+  await pane.navigateTo("C:\\original");
+  pane.setState({ selectedIndices: [1], cursorIndex: 1 });
+  const snapshot = api.captureRenameRequest(pane.state);
+  globalThis.__kufInvoke = async () => [entry("..", { is_dir: true }), entry("unrelated.txt")];
+  await pane.refresh();
+  assert.deepEqual([...pane.state.selectedIndices], []);
+  assert.equal(pane.state.files[pane.state.cursorIndex].name, "unrelated.txt");
+  const preview = api.buildRenamePreview(snapshot.files, snapshot.existingFiles, options({ mode: "affix", prefix: "new-" }), true);
+  assert.deepEqual(preview.plan, [{ from: "old.JPG", to: "new-old.JPG" }]);
+  assert.equal(snapshot.directory, "C:\\original");
+  assert.deepEqual(snapshot.selectedIndices, [1]);
+  assert.deepEqual(snapshot.existingFiles.map((file) => file.name), ["..", "old.JPG", "unrelated.txt"]);
+});
+
+test("cursor-only rename snapshots keep entry values and the directory fixed after live state changes", async (t) => {
+  const pane = api.createRoot((dispose) => { t.after(dispose); return api.createPaneState(); });
+  globalThis.__kufInvoke = async () => [entry("old.TXT"), entry("unrelated.txt")];
+  await pane.navigateTo("/original");
+  const snapshot = api.captureRenameRequest(pane.state);
+  pane.setState("files", 0, "name", "changed-by-refresh.bin");
+  await pane.navigateTo("/another");
+  const preview = api.buildRenamePreview(snapshot.files, snapshot.existingFiles, options({ mode: "affix", prefix: "new-" }));
+  assert.deepEqual(preview.plan, [{ from: "old.TXT", to: "new-old.TXT" }]);
+  assert.equal(snapshot.directory, "/original");
+  assert.deepEqual(snapshot.selectedIndices, []);
+  assert.equal(snapshot.cursorIndex, 0);
+  assert.deepEqual(snapshot.existingFiles.map((file) => file.name), ["old.TXT", "unrelated.txt"]);
+  assert.deepEqual(api.captureRenameRequest({ path: "/", files: [entry("..", { is_dir: true })], selectedIndices: [], cursorIndex: 0 }).files, []);
+});

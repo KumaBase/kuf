@@ -317,17 +317,18 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     if (state.path === parent) setCursorToFile(baseName(origin));
   };
 
-  const getSelectedPaths = (): string[] => {
+  const getSelectedNames = (): string[] => {
     if (state.selectedIndices.length > 0) {
       return state.selectedIndices
         .filter((i) => i >= 0 && i < state.files.length)
         .filter((i) => state.files[i].name !== "..")
-        .map((i) => joinPath(state.path, state.files[i].name));
+        .map((i) => state.files[i].name);
     }
     const file = state.files[state.cursorIndex];
-    if (file && file.name !== "..") return [joinPath(state.path, file.name)];
+    if (file && file.name !== "..") return [file.name];
     return [];
   };
+  const getSelectedPaths = (): string[] => getSelectedNames().map((name) => joinPath(state.path, name));
 
   const setCursorToFile = (name: string) => {
     resetRangeSelection();
@@ -393,6 +394,7 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     historyForward,
     jumpHistory,
     navigateParent,
+    getSelectedNames,
     getSelectedPaths,
     setCursorToFile,
   };

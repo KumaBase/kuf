@@ -24,6 +24,7 @@ import BulkRenameDialog from "./components/BulkRenameDialog";
 import ExternalCommandsDialog from "./components/ExternalCommandsDialog";
 import type { ExternalCommandContext } from "./external-commands";
 import { compareFilesForSelection } from "./filer-selection";
+import { captureRenameRequest, type RenameRequestSnapshot } from "./batch-rename";
 import {
   createTabState,
   keybinds,
@@ -104,7 +105,7 @@ function App() {
   const [compareTarget, setCompareTarget] = createSignal<{ source: PaneActions; target: PaneActions } | null>(null);
   const [searchTarget, setSearchTarget] = createSignal<PaneActions | null>(null);
   const [archiveRequest, setArchiveRequest] = createSignal<{ mode: "create" | "extract"; target: string; sources: string[]; pane: PaneActions } | null>(null);
-  const [renameTarget, setRenameTarget] = createSignal<PaneActions | null>(null);
+  const [renameTarget, setRenameTarget] = createSignal<RenameRequestSnapshot | null>(null);
   const [externalContext, setExternalContext] = createSignal<ExternalCommandContext | null>(null);
   const [workspaceData, setWorkspaceData] = createSignal<WorkspaceData>({ version: 1, last_session: null, workspaces: [] });
   const [sessionReady, setSessionReady] = createSignal(false);
@@ -889,10 +890,14 @@ function App() {
           if (isRemotePath(active.state.path)) flashStatus("配下の検索はローカルフォルダで使えます");
           else setSearchTarget(active);
           break;
-        case "bulk_rename":
+        case "bulk_rename": {
           if (isRemotePath(active.state.path)) flashStatus("一括リネームはローカルフォルダで使えます");
-          else if (active.getSelectedPaths().length) setRenameTarget(active);
+          else {
+            const snapshot = captureRenameRequest(active.state);
+            if (snapshot.files.length) setRenameTarget(snapshot);
+          }
           break;
+        }
         case "external_commands": {
           if (isRemotePath(active.state.path)) { flashStatus("外部コマンドはローカルフォルダで使えます"); break; }
           const file = active.state.files[active.state.cursorIndex];
@@ -1317,9 +1322,9 @@ function App() {
           break;
         }
         case "copy_name": {
-          const paths = active.getSelectedPaths();
-          if (!paths.length) break;
-          await copyText(paths.map(baseName).join("\n"));
+          const names = active.getSelectedNames();
+          if (!names.length) break;
+          await copyText(names.join("\n"));
           flashStatus("名前をコピーしました");
           break;
         }
@@ -1623,14 +1628,14 @@ function App() {
       <Show when={externalContext()}>{(context) => { const captured = context(); return <ExternalCommandsDialog context={captured} onClose={() => setExternalContext(null)} onRun={(name) => {
         void invoke("external_command_run", { name, context: captured }).then(() => flashStatus(`起動しました: ${name}`)).catch((error) => flashStatus(`外部コマンド: ${error}`));
       }} />; }}</Show>
-      <Show when={renameTarget()}>{(pane) => <BulkRenameDialog directory={pane().state.path} files={pane().state.selectedIndices.length ? pane().state.selectedIndices.map((index) => pane().state.files[index]).filter((file) => file && file.name !== "..") : pane().state.files.filter((file, index) => index === pane().state.cursorIndex && file.name !== "..")} existingFiles={pane().state.files} onClose={() => setRenameTarget(null)} onApply={(plan) => {
-        const directory = pane().state.path; setRenameTarget(null);
+      <Show when={renameTarget()}>{(request) => { const captured = request(); return <BulkRenameDialog directory={captured.directory} files={captured.files} existingFiles={captured.existingFiles} onClose={() => setRenameTarget(null)} onApply={(plan) => {
+        const directory = captured.directory; setRenameTarget(null);
         void runOp("名前を変更しています…", async (operationId) => {
           const result = await invoke<{ completed: { from: string; to: string }[]; pending: { from: string; to: string }[]; error: string | null; cancelled: boolean }>("batch_rename_items", { directory, plan, operationId });
           if (result.error || result.pending.length) throw new Error(`${result.completed.length} 件変更、${result.pending.length} 件未完了。\n${result.error ?? "処理を停止しました"}\n未完了: ${result.pending.map((item) => item.from).join(", ")}`);
           flashStatus(`${result.completed.length} 件の名前を変更しました`);
         }, [directory], true);
-      }} />}</Show>
+      }} />; }}</Show>
       <Show when={patternTarget()}>{(pane) => <PatternSelectDialog caseSensitive={settings()?.sort.case_sensitive ?? false} onClose={() => setPatternTarget(null)} onApply={(pattern, mode) => {
         pane().selectPattern(pattern, mode); setPatternTarget(null);
       }} />}</Show>
