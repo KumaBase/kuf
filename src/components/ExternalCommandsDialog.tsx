@@ -90,7 +90,7 @@ export default function ExternalCommandsDialog(props: { context: ExternalCommand
           <label>引数（1行につき1個・引用符は不要）<textarea class="settings-input" rows={5} value={draft().args.join("\n")} onInput={(event) => setDraft((command) => ({ ...command, args: event.currentTarget.value === "" ? [] : event.currentTarget.value.split("\n") }))} /></label>
           <Show when={draft().args.length === 0 || draft().args.length === 1 && draft().args[0] === ""}><label><input type="checkbox" style={{ width: "auto" }} checked={draft().args.length === 1} onChange={(event) => setDraft((command) => ({ ...command, args: event.currentTarget.checked ? [""] : [] }))} /> 空の引数を1個渡す</label></Show>
           <p class="sort-hint">{"{file}: カーソルのパス　{name}: 名前　{dir}: 現在地　{other}: 相手の場所　{selected}: 選択パス（独立した1行で指定）"}</p>
-          <div class="external-preview" aria-label="実行内容のプレビュー"><strong>{draft().program || "実行ファイル"}</strong><For each={preview()}>{(arg, index) => <div><span>{index() + 1}:</span> {arg === "" ? "（空の引数）" : arg}</div>}</For></div>
+          <div class="external-preview" aria-label="実行内容のプレビュー"><strong>{draft().program || "実行ファイル"}</strong><For each={preview().slice(0, 100)}>{(arg, index) => <div><span>{index() + 1}:</span> {arg === "" ? "（空の引数）" : arg}</div>}</For><Show when={preview().length > 100}><p>先頭100個を表示しています。残り{preview().length - 100}個を含む、全{preview().length}個の引数が実行対象です。</p></Show></div>
         </fieldset>
       </div>
       <Show when={error()}><p class="external-error" role="alert">{error()}</p></Show>

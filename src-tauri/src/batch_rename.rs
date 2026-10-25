@@ -100,10 +100,16 @@ pub async fn batch_rename_items(
     let operation = operations.get(operation_id.as_deref())?;
     crate::background::run(move || {
         let plan = validate_plan(Path::new(&directory), plan)?;
+        let mut last_progress = std::time::Instant::now();
         Ok(execute_plan(plan,
             || operation.as_ref().map_or(Ok(()), |op| op.check()),
             rename_no_replace,
-            |done, total| { if let Some(op) = &operation { op.progress(&app, done, total); } },
+            |done, total| {
+                if done == 0 || done == total || last_progress.elapsed().as_millis() >= 100 {
+                    if let Some(op) = &operation { op.progress(&app, done, total); }
+                    last_progress = std::time::Instant::now();
+                }
+            },
         ))
     }).await
 }
