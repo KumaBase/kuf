@@ -175,6 +175,26 @@ body,
   margin-left: 8px;
 }
 
+.pane-sort {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pane-sort:hover, .pane-sort:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.sort-dialog { width: min(420px, calc(100vw - 32px)); }
+.sort-dialog .settings-input { width: 100%; }
+.sort-hint { color: var(--text-secondary); font-size: 0.85em; line-height: 1.6; margin-bottom: 8px; }
+
 /* --- Pane Body --- */
 
 .pane-body {

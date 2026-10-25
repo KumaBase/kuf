@@ -3,6 +3,7 @@ export interface FileInfo {
   is_dir: boolean;
   size: number;
   modified: string | null;
+  modified_timestamp?: number | null;
   extension: string;
   is_hidden: boolean;
   is_symlink: boolean;
@@ -25,6 +26,10 @@ export interface PaneState {
 
 export type Side = "left" | "right";
 
+export type SortKey = "name" | "extension" | "size" | "modified";
+export type SortOrder = "asc" | "desc";
+export interface SortSpec { key: SortKey; order: SortOrder; }
+
 export interface TabSnapshot {
   id: string;
   left: PaneState;
@@ -33,7 +38,7 @@ export interface TabSnapshot {
 }
 
 export interface WorkspaceSnapshot {
-  tabs: { left_path: string; right_path: string; active_side: Side }[];
+  tabs: { left_path: string; right_path: string; active_side: Side; left_sort?: SortSpec; right_sort?: SortSpec }[];
   active_index: number;
 }
 export interface NamedWorkspace { name: string; snapshot: WorkspaceSnapshot; }
@@ -129,6 +134,12 @@ export type Command =
   | "open_terminal"
   | "select_same_ext"
   | "filter"
+  | "sort"
+  | "sort_name"
+  | "sort_extension"
+  | "sort_size"
+  | "sort_modified"
+  | "sort_reverse"
   | "workspace_save"
   | "workspace_list";
 
@@ -247,14 +258,45 @@ export function pathLabel(path: string): string {
   return normalized.substring(lastSlash + 1);
 }
 
-export function sortFiles(files: FileInfo[], dirsFirst: boolean, caseSensitive: boolean): FileInfo[] {
+export function sortFiles(files: FileInfo[], dirsFirst: boolean, caseSensitive: boolean, sort: SortSpec = { key: "name", order: "asc" }): FileInfo[] {
+  const fold = (value: string) => caseSensitive ? value : value.toLowerCase();
+  const extensionKey = (file: FileInfo) => {
+    if (!file.extension) return "";
+    if (!caseSensitive) return file.extension.toLowerCase();
+    // The native extension field is lowercase; recover its original spelling.
+    const dot = file.name.lastIndexOf(".");
+    return dot > 0 && dot < file.name.length - 1 ? file.name.slice(dot + 1) : "";
+  };
+  const compare = (a: string | number, b: string | number) => a < b ? -1 : a > b ? 1 : 0;
+  const modifiedTime = (file: FileInfo): number | null => {
+    // Only older payloads omit this field. Explicit null means unavailable.
+    if (file.modified_timestamp !== undefined) {
+      return file.modified_timestamp !== null && Number.isFinite(file.modified_timestamp) ? file.modified_timestamp : null;
+    }
+    if (!file.modified || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(file.modified)) return null;
+    const value = Date.parse(`${file.modified.replace(" ", "T")}:00`);
+    return Number.isFinite(value) ? value : null;
+  };
+  const direction = sort.order === "desc" ? -1 : 1;
   const parent = files.filter((f) => f.name === "..");
   const rest = files.filter((f) => f.name !== "..").map((file) => ({
-    file, key: caseSensitive ? file.name : file.name.toLowerCase(),
+    file, name: fold(file.name), extension: extensionKey(file),
+    modified: sort.key === "modified" ? modifiedTime(file) : null,
   }));
   rest.sort((a, b) => {
     if (dirsFirst && a.file.is_dir !== b.file.is_dir) return a.file.is_dir ? -1 : 1;
-    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    let result = 0;
+    switch (sort.key) {
+      case "extension": result = compare(a.extension, b.extension); break;
+      case "size": result = compare(a.file.size, b.file.size); break;
+      case "modified":
+        // Missing timestamps remain last in either direction.
+        if (a.modified === null && b.modified !== null) return 1;
+        if (b.modified === null && a.modified !== null) return -1;
+        result = compare(a.modified ?? 0, b.modified ?? 0);
+        break;
+    }
+    return direction * (result || compare(a.name, b.name));
   });
   return [...parent, ...rest.map(({ file }) => file)];
 }

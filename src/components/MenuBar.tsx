@@ -1,5 +1,7 @@
 import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
-import type { ConnectedServer } from "../types";
+import type { Command, ConnectedServer, SortSpec } from "../types";
+import { SORT_LABELS } from "../commands";
+import { keybinds } from "../state";
 
 export type MenuAction = string;
 
@@ -18,11 +20,13 @@ interface MenuDef {
 
 export default function MenuBar(props: {
   servers: ConnectedServer[];
+  sort: SortSpec;
   onAction: (action: MenuAction) => void;
 }) {
   const [open, setOpen] = createSignal<string | null>(null);
 
   function menus(): MenuDef[] {
+    const shortcutFor = (command: Command) => Object.entries(keybinds()).find(([, value]) => value === command)?.[0];
     const remoteItems: MenuItemDef[] = [
       { label: "サーバーに接続...", action: "ssh_connect", shortcut: "Ctrl+S" },
       { label: "切断", action: "ssh_disconnect" },
@@ -67,6 +71,13 @@ export default function MenuBar(props: {
           { label: "一覧を絞り込む", action: "filter", shortcut: "/ / Ctrl+F" },
           { label: "最新の情報に更新", action: "refresh", shortcut: "Ctrl+R" },
           { label: "隠しファイルの表示切替", action: "toggle_hidden" },
+          { sep: true },
+          { label: "並び順（ソート）...", action: "sort", shortcut: shortcutFor("sort") },
+          ...Object.entries(SORT_LABELS).map(([key, label]) => ({
+            label: `${props.sort.key === key ? "✓ " : ""}${label}順`, action: `sort_${key}`,
+            shortcut: shortcutFor(`sort_${key}` as Command),
+          })),
+          { label: props.sort.order === "asc" ? "降順にする" : "昇順にする", action: "sort_reverse", shortcut: shortcutFor("sort_reverse") },
         ],
       },
       {

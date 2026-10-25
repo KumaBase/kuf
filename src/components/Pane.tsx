@@ -1,5 +1,6 @@
 import { createEffect, Show, type Component } from "solid-js";
-import type { PaneState, Side } from "../types";
+import type { PaneState, Side, SortSpec } from "../types";
+import { SORT_LABELS } from "../commands";
 import FileList from "./FileList";
 import { focusApp } from "../focus";
 import type { FilterMode } from "../filter";
@@ -9,6 +10,8 @@ interface PaneProps {
   side: Side;
   state: PaneState;
   isActive: boolean;
+  sort: SortSpec;
+  onSort: () => void;
   loading?: boolean;
   loadError?: string;
   watchError?: string;
@@ -43,6 +46,13 @@ const Pane: Component<PaneProps> = (props) => {
     >
       <div class="path-bar" classList={{ "path-active": props.isActive }}>
         <span class="path-text">{props.state.path}</span>
+        <button
+          type="button"
+          class="pane-sort"
+          aria-label={`${props.side === "left" ? "左" : "右"}ペインのソート: ${SORT_LABELS[props.sort.key]}・${props.sort.order === "asc" ? "昇順" : "降順"}`}
+          title="並び順を変更"
+          onClick={props.onSort}
+        >{SORT_LABELS[props.sort.key]} {props.sort.order === "asc" ? "↑" : "↓"}</button>
         <span class="path-count" role="status">{props.loading ? "読み込み中…" : `${props.state.files.length} items`}</span>
       </div>
       <Show when={props.filterOpen || props.filterQuery}>

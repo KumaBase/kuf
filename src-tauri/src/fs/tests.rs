@@ -32,6 +32,40 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn local_listing_preserves_update_order_within_the_same_displayed_minute() {
+    let root = Fixture::new();
+    // These instants share one displayed minute; their names deliberately have
+    // the opposite order so sorting by the rounded display cannot recover it.
+    let earlier_millis = 1_700_000_045_000_u64;
+    let later_millis = 1_700_000_085_000_u64;
+    for (name, millis) in [
+        ("z-earlier.txt", earlier_millis),
+        ("a-later.txt", later_millis),
+    ] {
+        let file = std::fs::File::create(root.path().join(name)).unwrap();
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_millis(millis))
+            .unwrap();
+    }
+
+    let files = LocalFs.read_dir(root.path()).unwrap();
+    let earlier = files
+        .iter()
+        .find(|file| file.name == "z-earlier.txt")
+        .unwrap();
+    let later = files
+        .iter()
+        .find(|file| file.name == "a-later.txt")
+        .unwrap();
+    assert!(earlier.modified.is_some());
+    assert_eq!(earlier.modified, later.modified);
+    assert_eq!(earlier.modified_timestamp, Some(earlier_millis as i64));
+    assert_eq!(later.modified_timestamp, Some(later_millis as i64));
+    assert!(earlier.modified_timestamp < later.modified_timestamp);
+    let parent = files.iter().find(|file| file.name == "..").unwrap();
+    assert_eq!(parent.modified_timestamp, None);
+}
+
+#[test]
 fn local_copy_move_and_rename_preserve_contents_and_respect_conflicts() {
     let root = Fixture::new();
     let source = root.path().join("source");
