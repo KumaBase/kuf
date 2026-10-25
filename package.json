@@ -1,14 +1,14 @@
 {
   "name": "kuf",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "check": "tsc --noEmit",
-    "test": "node --test tests/frontend.test.mjs",
+    "test": "node scripts/test.mjs",
     "bench": "node scripts/benchmark.mjs",
     "tauri": "tauri"
   },

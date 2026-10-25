@@ -1,0 +1,18 @@
+.preview-dialog { width: min(1100px, calc(100vw - 32px)); height: min(850px, calc(100vh - 32px)); min-height: 180px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; outline: none; font-size: var(--chrome-size); }
+.preview-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+.preview-header span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.preview-header button { flex-shrink: 0; }
+.preview-toolbar, .preview-find { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); font-size: 0.85em; }
+.preview-toolbar label, .preview-find label { display: inline-flex; align-items: center; gap: 6px; }
+.preview-toolbar select, .preview-find input, .preview-find button { background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; font: inherit; padding: 4px 8px; }
+.preview-toolbar select:focus-visible, .preview-find input:focus-visible, .preview-find button:focus-visible { outline: 1px solid var(--accent); }
+.preview-find input { width: min(280px, 35vw); }
+.preview-find button:disabled, .preview-toolbar select:disabled { opacity: 0.45; }
+.preview-note { padding: 6px 12px; margin: 0; font-size: 0.8em; color: #e0af68; border-bottom: 1px solid var(--border); }
+.preview-text { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px; font-family: var(--font-mono); font-size: var(--font-size); line-height: 1.5; tab-size: 4; }
+.preview-text mark { color: inherit; background: #5a4d1c; }
+.preview-text mark.preview-match-current { color: #1a1b26; background: #e0af68; }
+.preview-message { padding: 20px; overflow: auto; white-space: pre-wrap; }
+.preview-error { color: #f7768e; }
+.preview-image-body { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.preview-image-body img { max-width: 100%; max-height: 100%; object-fit: contain; }

@@ -131,6 +131,142 @@ fn copying_or_moving_a_file_onto_itself_never_modifies_the_source() {
 }
 
 #[test]
+fn rename_rejects_path_changes_and_existing_destinations_without_touching_contents() {
+    let root = Fixture::new();
+    let original = root.path().join("original.TXT");
+    std::fs::write(&original, b"original").unwrap();
+    std::fs::write(root.path().join("occupied"), b"keep").unwrap();
+    for name in ["../escape", "nested/escape", "nested\\escape", ".", "..", "occupied"] {
+        assert!(LocalFs.rename_item(&original, name).is_err(), "{name}");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original");
+        assert_eq!(std::fs::read(root.path().join("occupied")).unwrap(), b"keep");
+    }
+    assert!(LocalFs.rename_item(&original, &"x".repeat(256)).is_err());
+    LocalFs.rename_item(&original, "original.TXT").unwrap();
+    assert_eq!(std::fs::read(&original).unwrap(), b"original");
+    std::fs::create_dir(root.path().join("folder")).unwrap();
+    std::fs::create_dir(root.path().join("other-folder")).unwrap();
+    assert!(LocalFs.rename_item(&root.path().join("folder"), "other-folder").is_err());
+    assert!(root.path().join("folder").is_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_case_only_rename_preserves_file_identity_and_contents() {
+    let root = Fixture::new();
+    let original = root.path().join("Original.TXT");
+    std::fs::write(&original, b"case-only").unwrap();
+    LocalFs.rename_item(&original, "original.txt").unwrap();
+    let names: Vec<_> = std::fs::read_dir(root.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("original.txt")]);
+    assert_eq!(std::fs::read(root.path().join("original.txt")).unwrap(), b"case-only");
+}
+
+#[cfg(unix)]
+#[test]
+fn rename_rejects_a_dangling_symlink_destination() {
+    let root = Fixture::new();
+    let original = root.path().join("original");
+    std::fs::write(&original, b"original").unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing"), root.path().join("dangling")).unwrap();
+    assert!(LocalFs.rename_item(&original, "dangling").is_err());
+    assert_eq!(std::fs::read(&original).unwrap(), b"original");
+    assert!(std::fs::symlink_metadata(root.path().join("dangling")).unwrap().file_type().is_symlink());
+}
+
+#[cfg(unix)]
+fn assert_case_sensitive_rename_conflicts_preserve_both_entries(root: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    use super::local::is_case_only_alias;
+    let source = root.join("Report.txt");
+    let target = root.join("report.txt");
+    std::fs::write(&source, b"source").unwrap();
+    let mut target_file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target).unwrap();
+    std::io::Write::write_all(&mut target_file, b"target").unwrap();
+    drop(target_file);
+    assert!(!is_case_only_alias(&source, &target));
+    assert!(LocalFs.rename_item(&source, "report.txt").is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"source");
+    assert_eq!(std::fs::read(&target).unwrap(), b"target");
+
+    let hard_source = root.join("Hard.txt");
+    let hard_target = root.join("hard.txt");
+    std::fs::hard_link(&source, &hard_source).unwrap();
+    std::fs::hard_link(&source, &hard_target).unwrap();
+    assert_eq!(std::fs::metadata(&hard_source).unwrap().ino(), std::fs::metadata(&hard_target).unwrap().ino());
+    assert!(!is_case_only_alias(&hard_source, &hard_target));
+    assert!(LocalFs.rename_item(&hard_source, "hard.txt").is_err());
+    assert!(hard_source.exists() && hard_target.exists());
+
+    let linked_source = root.join("Linked.txt");
+    let linked_target = root.join("linked.txt");
+    std::fs::write(&linked_source, b"linked source").unwrap();
+    std::os::unix::fs::symlink("Linked.txt", &linked_target).unwrap();
+    assert_eq!(std::fs::metadata(&linked_source).unwrap().ino(), std::fs::metadata(&linked_target).unwrap().ino());
+    assert!(!is_case_only_alias(&linked_source, &linked_target));
+    assert!(LocalFs.rename_item(&linked_source, "linked.txt").is_err());
+    assert_eq!(std::fs::read(&linked_source).unwrap(), b"linked source");
+    assert_eq!(std::fs::read_link(&linked_target).unwrap(), Path::new("Linked.txt"));
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn unix_case_sensitive_case_only_rename_and_conflicts_preserve_contents() {
+    let root = Fixture::new();
+    let original = root.path().join("Original.txt");
+    std::fs::write(&original, b"case change").unwrap();
+    assert!(!root.path().join("original.txt").exists());
+    LocalFs.rename_item(&original, "original.txt").unwrap();
+    assert_eq!(std::fs::read(root.path().join("original.txt")).unwrap(), b"case change");
+    assert_case_sensitive_rename_conflicts_preserve_both_entries(root.path());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_case_insensitive_case_only_rename_preserves_the_single_entry() {
+    use std::os::unix::fs::MetadataExt;
+    use super::local::{is_case_only_alias, rename_test_volume::MacVolume};
+    let volume = MacVolume::new(false);
+    let root = volume.path();
+    let source = root.join("Report.txt");
+    let target = root.join("report.txt");
+    std::fs::write(&source, b"preserve report").unwrap();
+    let identity = std::fs::symlink_metadata(&source).unwrap().ino();
+    assert!(std::fs::symlink_metadata(&target).is_ok(), "The generated APFS volume must be case insensitive");
+    assert!(is_case_only_alias(&source, &target));
+    LocalFs.rename_item(&source, "report.txt").unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"preserve report");
+    assert_eq!(std::fs::symlink_metadata(&target).unwrap().ino(), identity);
+    let names: Vec<_> = std::fs::read_dir(root).unwrap().map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_str().is_some_and(|name| name.eq_ignore_ascii_case("report.txt"))).collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("report.txt")]);
+
+    std::fs::create_dir(root.join("Folder")).unwrap();
+    std::fs::write(root.join("Folder/inside"), b"inside").unwrap();
+    assert!(is_case_only_alias(&root.join("Folder"), &root.join("folder")));
+    LocalFs.rename_item(&root.join("Folder"), "folder").unwrap();
+    assert_eq!(std::fs::read(root.join("folder/inside")).unwrap(), b"inside");
+
+    std::os::unix::fs::symlink("report.txt", root.join("ReportLink")).unwrap();
+    assert!(is_case_only_alias(&root.join("ReportLink"), &root.join("reportlink")));
+    LocalFs.rename_item(&root.join("ReportLink"), "reportlink").unwrap();
+    assert_eq!(std::fs::read_link(root.join("reportlink")).unwrap(), Path::new("report.txt"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_case_sensitive_volume_never_treats_distinct_entries_as_case_aliases() {
+    use super::local::rename_test_volume::MacVolume;
+    let volume = MacVolume::new(true);
+    let original = volume.path().join("Original.txt");
+    std::fs::write(&original, b"case change").unwrap();
+    assert!(!volume.path().join("original.txt").exists(), "The generated APFS volume must be case sensitive");
+    LocalFs.rename_item(&original, "original.txt").unwrap();
+    assert_eq!(std::fs::read(volume.path().join("original.txt")).unwrap(), b"case change");
+    assert_case_sensitive_rename_conflicts_preserve_both_entries(volume.path());
+}
+
+#[test]
 fn copying_and_moving_to_a_different_name_in_the_same_directory_still_work() {
     let root = Fixture::new();
     for overwrite in [false, true] {

@@ -202,11 +202,45 @@ fn default_keybinds_toml() -> String {
 "Ctrl+Shift+Tab" = "tab_prev"
 "Escape" = "clear_selection"
 "Ctrl+s" = "ssh_connect"
+"/" = "filter"
+"Ctrl+f" = "filter"
+"f" = "filter"
+"Shift+ " = "toggle_select_up"
+"Ctrl+Shift+p" = "command_palette"
+"Ctrl+," = "settings"
+"Ctrl+q" = "quit"
+"Ctrl+v" = "paste"
+"Ctrl+Shift+t" = "tab_duplicate"
+"h" = "history_list"
+"w" = "compare_panes"
+"Shift+f" = "search_files"
+"p" = "zip_create"
+"u" = "zip_extract"
+"@" = "select_pattern"
+"Shift+@" = "select_pattern"
+"Shift+ArrowUp" = "select_range_up"
+"Shift+ArrowDown" = "select_range_down"
+"Shift+Home" = "select_range_top"
+"Shift+End" = "select_range_bottom"
+"Shift+PageUp" = "select_range_page_up"
+"Shift+PageDown" = "select_range_page_down"
+"Shift+r" = "bulk_rename"
+"Shift+x" = "external_commands"
 "#
     .to_string()
 }
 
 // --- Load / Save settings ---
+
+#[tauri::command]
+pub fn settings_defaults() -> AppSettings {
+    AppSettings::default()
+}
+
+#[tauri::command]
+pub fn keybinds_defaults() -> Result<serde_json::Value, String> {
+    toml::from_str(&default_keybinds_toml()).map_err(|e| format!("Parse error: {e}"))
+}
 
 #[tauri::command]
 pub fn settings_load() -> Result<AppSettings, String> {

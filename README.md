@@ -2,7 +2,7 @@
 
 Dual-pane file manager built with Tauri 2.0 + SolidJS.
 
-![version](https://img.shields.io/badge/version-0.3.0-blue)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
 
 ## Requirements
 
@@ -52,8 +52,8 @@ npx tauri build
 | Platform | Output |
 |----------|--------|
 | macOS    | `src-tauri/target/release/bundle/macos/kuf.app` |
-| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.3.0_x64_en-US.msi` |
-| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.3.0_amd64.deb` |
+| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.4.0_x64_en-US.msi` |
+| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.4.0_amd64.deb` |
 
 ## Type Check
 
@@ -105,6 +105,15 @@ kuf/
 | Alt+←/→     | History back/fwd  |
 | Ctrl+T/W    | New/Close tab     |
 | Escape      | Clear filter, then selection |
+| Ctrl+Shift+P | Find and run a command |
+| H           | Directory history list |
+| W           | Select files by comparing the two panes |
+| @           | Select by wildcard |
+| Shift+arrows / Home / End | Extend or shrink a selection |
+| Shift+F     | Search names in subfolders (local) |
+| Shift+R     | Preview and apply bulk rename (local) |
+| P / U       | Create / extract ZIP (local) |
+| Shift+X     | Saved external tools with path arguments |
 
 Keybindings can be customized from Settings (Ctrl+,) > Keymap.
 
@@ -116,6 +125,7 @@ Keybindings can be customized from Settings (Ctrl+,) > Keymap.
 - Local Delete/F8 moves items to the OS trash. Windows supports fixed local drives and refuses unsupported locations without a permanent-delete fallback. Remote deletion remains permanent and requires confirmation.
 
 See [使い方と検証結果](docs/usability.md) for details and limitations.
+The [あふｗ・だいなファイラーとの比較](docs/filer-comparison.md) records the reference sources, implemented workflows and remaining gaps.
 
 ## Configuration
 
@@ -130,6 +140,7 @@ Config files are stored in the platform-specific config directory:
 - `keybind.toml` — Custom key bindings
 - `bookmarks.toml` — Saved bookmarks
 - `workspaces.json` — Named workspaces and the previous session (paths, tabs and active pane)
+- `external-commands.json` — Saved external tools and separate argument templates
 
 ## Tech Stack
 

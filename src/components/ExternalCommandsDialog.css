@@ -1,0 +1,15 @@
+.external-dialog { width: min(880px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow-y: auto; }
+.external-layout { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 3fr); gap: 16px; margin: 12px 0; }
+.external-list { display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }
+.external-list [aria-pressed="true"] { border-color: var(--accent); background: var(--bg-cursor-active); }
+.external-fields { border: 0; min-width: 0; }
+.external-fields label { display: block; margin-bottom: 10px; }
+.external-fields input, .external-fields textarea { width: 100%; margin-top: 5px; }
+.external-fields textarea { font-family: var(--font-mono); resize: vertical; }
+.external-program { display: flex; align-items: center; gap: 6px; }
+.external-program input { min-width: 0; }
+.external-program button { flex-shrink: 0; }
+.external-preview { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--bg-secondary); max-height: 140px; overflow-y: auto; font-family: var(--font-mono); font-size: .85em; }
+.external-preview span { opacity: .6; }
+.external-error { color: #f7768e; white-space: pre-wrap; margin: 12px 0; }
+@media (max-width: 640px) { .external-layout { grid-template-columns: 1fr; } .external-list { max-height: 100px; } }

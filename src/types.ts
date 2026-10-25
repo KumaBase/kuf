@@ -13,6 +13,7 @@ export interface FileInfo {
 export interface HistoryEntry {
   path: string;
   cursorIndex: number;
+  cursorName?: string;
 }
 
 export interface PaneState {
@@ -83,6 +84,30 @@ export interface AppSettings {
 }
 
 export type Command =
+  | "command_palette"
+  | "settings"
+  | "toggle_hidden"
+  | "open_config_dir"
+  | "paste"
+  | "tab_duplicate"
+  | "history_list"
+  | "select_pattern"
+  | "select_files"
+  | "select_directories"
+  | "select_range_up"
+  | "select_range_down"
+  | "select_range_top"
+  | "select_range_bottom"
+  | "select_range_page_up"
+  | "select_range_page_down"
+  | "compare_panes"
+  | "search_files"
+  | "zip_create"
+  | "zip_extract"
+  | "bulk_rename"
+  | "external_commands"
+  | "toggle_select_up"
+  | "quit"
   | "cursor_up"
   | "cursor_down"
   | "cursor_top"

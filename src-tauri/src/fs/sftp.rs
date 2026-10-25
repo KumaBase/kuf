@@ -143,11 +143,22 @@ impl SftpFs {
         path: &Path,
         new_name: &str,
     ) -> Result<(), String> {
+        crate::fs::local::validate_item_name(new_name)?;
         let sftp = Self::create_sftp(handle).await?;
         let parent = path
             .parent()
             .ok_or_else(|| format!("Cannot get parent of: {}", path.display()))?;
         let new_path = parent.join(new_name);
+        if path.file_name() == Some(std::ffi::OsStr::new(new_name)) { return Ok(()); }
+        // SFTP v3 rename does not request an overwrite extension. Check lstat
+        // first as well, so existing dangling links count as conflicts.
+        let destination = new_path.to_string_lossy().to_string();
+        match sftp.symlink_metadata(destination.clone()).await {
+            Ok(_) => return Err(format!("Already exists: {new_name}")),
+            Err(russh_sftp::client::error::Error::Status(status))
+                if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => {},
+            Err(error) => return Err(format!("Cannot verify rename destination: {error}")),
+        }
         sftp.rename(path.to_string_lossy().to_string(), new_path.to_string_lossy().to_string())
             .await
             .map_err(|e| format!("Rename failed: {}", e))
