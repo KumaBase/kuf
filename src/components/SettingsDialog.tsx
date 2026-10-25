@@ -744,7 +744,7 @@ export default function SettingsDialog(props: {
         </fieldset>
 
         <div class="settings-footer">
-          <Show when={saveError()}><span role="alert">{saveError()}</span></Show>
+          <Show when={saveError()}><span class="settings-save-error" role="alert">{saveError()}</span></Show>
           <button class="dialog-btn" disabled={saving()} onClick={handleCancel}>
             キャンセル
           </button>

@@ -233,16 +233,48 @@ pub(crate) fn validate_local_rename_name(name: &str) -> Result<(), String> {
 }
 
 pub(crate) fn is_case_only_alias(source: &Path, destination: &Path) -> bool {
-    #[cfg(windows)]
+    #[cfg(any(unix, windows))]
     {
         let Some(source_name) = source.file_name().and_then(|name| name.to_str()) else { return false; };
         let Some(target_name) = destination.file_name().and_then(|name| name.to_str()) else { return false; };
-        source_name != target_name && source_name.eq_ignore_ascii_case(target_name)
-            && same_file(source, destination).unwrap_or(false)
+        if source_name == target_name || source_name.to_lowercase() != target_name.to_lowercase() { return false; }
+        let Some(parent) = source.parent().and_then(|path| fs::canonicalize(path).ok()) else { return false; };
+        if destination.parent().and_then(|path| fs::canonicalize(path).ok()).as_ref() != Some(&parent) { return false; }
+
+        // Inode equality alone also accepts two different hard links. Require
+        // exactly one case-folded directory entry, with the source's spelling.
+        let Ok(entries) = fs::read_dir(&parent) else { return false; };
+        let folded = source_name.to_lowercase();
+        let mut matching_entries = 0;
+        let mut source_spelling_present = false;
+        for entry in entries {
+            let Ok(entry) = entry else { return false; };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue; };
+            if name.to_lowercase() == folded {
+                matching_entries += 1;
+                source_spelling_present |= name == source_name;
+            }
+        }
+        if matching_entries != 1 || !source_spelling_present { return false; }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Do not follow links: a distinct symlink pointing at the source
+            // must never be mistaken for the same directory entry.
+            let (Ok(source), Ok(target)) = (fs::symlink_metadata(source), fs::symlink_metadata(destination)) else { return false; };
+            source.dev() == target.dev() && source.ino() == target.ino()
+        }
+        #[cfg(windows)]
+        { same_file(source, destination).unwrap_or(false) }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(unix, windows)))]
     { let _ = (source, destination); false }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "rename_test_volume.rs"]
+pub(crate) mod rename_test_volume;
 
 // Never fall back to replacing rename: a destination may appear after preflight.
 pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {

@@ -181,4 +181,23 @@ mod tests {
         assert_eq!(result.pending, vec![item("b", "new-b")]);
         assert!(root.0.join("b").exists());
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_batch_case_only_rename_succeeds_on_case_insensitive_volume() {
+        use crate::fs::local::rename_test_volume::MacVolume;
+        let volume = MacVolume::new(false);
+        let source = volume.path().join("Report.txt");
+        std::fs::write(&source, b"batch report").unwrap();
+        assert!(std::fs::symlink_metadata(volume.path().join("report.txt")).is_ok());
+        let plan = validate_plan(volume.path(), vec![item("Report.txt", "report.txt")]).unwrap();
+        let result = execute_plan(plan, || Ok(()), rename_no_replace, |_, _| {});
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.completed, vec![item("Report.txt", "report.txt")]);
+        assert!(result.pending.is_empty());
+        assert_eq!(std::fs::read(volume.path().join("report.txt")).unwrap(), b"batch report");
+        let names: Vec<_> = std::fs::read_dir(volume.path()).unwrap().map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_str().is_some_and(|name| name.eq_ignore_ascii_case("report.txt"))).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("report.txt")]);
+    }
 }

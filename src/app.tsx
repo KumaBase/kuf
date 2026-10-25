@@ -253,6 +253,7 @@ function App() {
       onContextMenu: (index: number, x: number, y: number) => {
         setActiveSide(side);
         pane.resetRangeSelection();
+        if (!pane.state.selectedIndices.includes(index)) pane.clearSelection();
         pane.setState("cursorIndex", index);
         const menuW = 260;
         const menuH = 420;
