@@ -8,10 +8,12 @@ import {
   isRemotePath,
   parseRemotePath,
   sortFiles,
+  baseName,
 } from "./types";
 import { applyTheme } from "./themes";
 import { compileFileFilter, prepareFileName, type FilterMode, type PreparedName } from "./filter";
 import { ensureMigemo, expandMigemoTerm } from "./migemo";
+import { applyPatternSelection, rangeSelection, selectByKind, type PatternSelectionMode } from "./filer-selection";
 
 const EMPTY_PANE: PaneState = {
   path: "",
@@ -35,8 +37,11 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   let listing: FileInfo[] = [];
   let preparedListing: { file: FileInfo; name: PreparedName; index: number }[] | null = null;
   let navGen = 0;
+  let rangeAnchor: number | null = null;
+  const resetRangeSelection = () => { rangeAnchor = null; };
 
   const setListing = (files: FileInfo[]) => {
+    resetRangeSelection();
     const preferences = settings()?.sort;
     listing = sortFiles(files, preferences?.dirs_first ?? true, preferences?.case_sensitive ?? false, sort());
     preparedListing = null;
@@ -47,6 +52,7 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     if (open) void ensureMigemo();
   };
   const showListing = (preserveCursor = true) => {
+    resetRangeSelection();
     const query = filterQuery();
     let files = listing;
     const highlights = new Map<string, readonly number[]>();
@@ -153,6 +159,7 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
         newHistory[state.historyIndex] = {
           path: state.path,
           cursorIndex: state.cursorIndex,
+          cursorName: state.files[state.cursorIndex]?.name,
         };
       }
       const last = newHistory[newHistory.length - 1];
@@ -180,26 +187,31 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   };
 
   const cursorUp = () => {
+    resetRangeSelection();
     if (state.cursorIndex > 0) setState("cursorIndex", state.cursorIndex - 1);
   };
 
   const cursorDown = () => {
+    resetRangeSelection();
     if (state.cursorIndex < state.files.length - 1)
       setState("cursorIndex", state.cursorIndex + 1);
   };
 
-  const cursorTop = () => setState("cursorIndex", 0);
+  const cursorTop = () => { resetRangeSelection(); setState("cursorIndex", 0); };
 
   const cursorBottom = () => {
+    resetRangeSelection();
     if (state.files.length > 0)
       setState("cursorIndex", state.files.length - 1);
   };
 
   const cursorPageUp = (visibleRows: number) => {
+    resetRangeSelection();
     setState("cursorIndex", Math.max(0, state.cursorIndex - visibleRows));
   };
 
   const cursorPageDown = (visibleRows: number) => {
+    resetRangeSelection();
     setState(
       "cursorIndex",
       Math.max(0, Math.min(state.files.length - 1, state.cursorIndex + visibleRows))
@@ -207,6 +219,7 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   };
 
   const toggleSelect = () => {
+    resetRangeSelection();
     const idx = state.cursorIndex;
     if (!state.files[idx] || state.files[idx].name === "..") {
       cursorDown();
@@ -222,10 +235,40 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   };
 
   const selectAll = () => {
+    resetRangeSelection();
     setState("selectedIndices", state.files.flatMap((file, i) => file.name === ".." ? [] : [i]));
   };
 
-  const clearSelection = () => setState("selectedIndices", []);
+  const toggleSelectUp = () => {
+    resetRangeSelection();
+    const index = state.cursorIndex;
+    if (state.files[index]?.name !== ".." && state.files[index]) {
+      const selected = new Set(state.selectedIndices);
+      if (selected.has(index)) selected.delete(index); else selected.add(index);
+      setState("selectedIndices", [...selected]);
+    }
+    if (index > 0) setState("cursorIndex", index - 1);
+  };
+
+  const clearSelection = () => { resetRangeSelection(); setState("selectedIndices", []); };
+
+  const selectRangeTo = (index: number) => {
+    if (!state.files.length || !Number.isFinite(index)) return;
+    const target = Math.max(0, Math.min(state.files.length - 1, Math.trunc(index)));
+    rangeAnchor ??= state.cursorIndex;
+    batch(() => {
+      setState("selectedIndices", rangeSelection(state.files, rangeAnchor!, target));
+      setState("cursorIndex", target);
+    });
+  };
+
+  const selectFiles = () => { resetRangeSelection(); setState("selectedIndices", selectByKind(state.files, "files")); };
+  const selectDirectories = () => { resetRangeSelection(); setState("selectedIndices", selectByKind(state.files, "directories")); };
+  const selectPattern = (pattern: string, mode: PatternSelectionMode = "replace") => {
+    const indices = applyPatternSelection(state.files, state.selectedIndices, pattern, mode, settings()?.sort.case_sensitive ?? false);
+    resetRangeSelection();
+    setState("selectedIndices", indices);
+  };
 
   const refresh = async () => {
     if (!state.path) return;
@@ -236,14 +279,14 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     showListing();
   };
 
-  const historyBack = async () => {
-    if (state.historyIndex <= 0) return;
+  const jumpHistory = async (nextIndex: number) => {
+    if (nextIndex === state.historyIndex || !Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= state.history.length) return;
     const newHistory = [...state.history];
     newHistory[state.historyIndex] = {
       path: state.path,
       cursorIndex: state.cursorIndex,
+      cursorName: state.files[state.cursorIndex]?.name,
     };
-    const nextIndex = state.historyIndex - 1;
     const entry = newHistory[nextIndex];
     if (!entry) return;
     const requested = await requestFiles(entry.path);
@@ -253,41 +296,25 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     setFilterQuery("");
     setFilterHighlights(new Map());
     setFilterOpen(false);
+    const namedCursor = entry.cursorName === undefined ? -1 : files.findIndex((file) => file.name === entry.cursorName);
     setState({
       path: entry.path,
       files,
-      cursorIndex: Math.max(0, Math.min(entry.cursorIndex, files.length - 1)),
+      cursorIndex: namedCursor >= 0 ? namedCursor : Math.max(0, Math.min(entry.cursorIndex, files.length - 1)),
       selectedIndices: [],
       history: newHistory,
       historyIndex: nextIndex,
     });
   };
 
-  const historyForward = async () => {
-    if (state.historyIndex >= state.history.length - 1) return;
-    const newHistory = [...state.history];
-    newHistory[state.historyIndex] = {
-      path: state.path,
-      cursorIndex: state.cursorIndex,
-    };
-    const nextIndex = state.historyIndex + 1;
-    const entry = newHistory[nextIndex];
-    if (!entry) return;
-    const requested = await requestFiles(entry.path);
-    if (!requested) return;
-    const files = setListing(requested);
-    setTotalCount(files.filter((file) => file.name !== "..").length);
-    setFilterQuery("");
-    setFilterHighlights(new Map());
-    setFilterOpen(false);
-    setState({
-      path: entry.path,
-      files,
-      cursorIndex: Math.max(0, Math.min(entry.cursorIndex, files.length - 1)),
-      selectedIndices: [],
-      history: newHistory,
-      historyIndex: nextIndex,
-    });
+  const historyBack = () => jumpHistory(state.historyIndex - 1);
+  const historyForward = () => jumpHistory(state.historyIndex + 1);
+  const navigateParent = async () => {
+    const origin = state.path;
+    const parent = parentPath(origin);
+    if (origin === parent) return;
+    await navigateTo(parent);
+    if (state.path === parent) setCursorToFile(baseName(origin));
   };
 
   const getSelectedPaths = (): string[] => {
@@ -303,11 +330,13 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   };
 
   const setCursorToFile = (name: string) => {
+    resetRangeSelection();
     const idx = state.files.findIndex((f) => f.name === name);
     if (idx >= 0) setState("cursorIndex", idx);
   };
 
   const invertSelection = () => {
+    resetRangeSelection();
     const selected = new Set(state.selectedIndices);
     const inverted = state.files
       .map((file, i) => (file.name !== ".." && !selected.has(i) ? i : -1))
@@ -316,6 +345,7 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
   };
 
   const selectByExtension = (ext: string) => {
+    resetRangeSelection();
     const indices = state.files
       .map((file, i) => (!file.is_dir && file.extension === ext ? i : -1))
       .filter((i) => i >= 0);
@@ -348,13 +378,21 @@ export function createPaneState(initialSort: SortSpec = { key: "name", order: "a
     cursorPageUp,
     cursorPageDown,
     toggleSelect,
+    toggleSelectUp,
     selectAll,
+    selectRangeTo,
+    resetRangeSelection,
+    selectFiles,
+    selectDirectories,
+    selectPattern,
     clearSelection,
     invertSelection,
     selectByExtension,
     refresh,
     historyBack,
     historyForward,
+    jumpHistory,
+    navigateParent,
     getSelectedPaths,
     setCursorToFile,
   };
@@ -543,6 +581,28 @@ export const DEFAULT_KEYBINDS: Record<string, string> = {
   "Ctrl+f": "filter",
   "Ctrl+Shift+s": "sort",
   "Ctrl+Shift+r": "sort_reverse",
+  "Ctrl+Shift+p": "command_palette",
+  "Ctrl+q": "quit",
+  "Ctrl+,": "settings",
+  "Ctrl+v": "paste",
+  "Ctrl+Shift+t": "tab_duplicate",
+  h: "history_list",
+  w: "compare_panes",
+  "Shift+f": "search_files",
+  p: "zip_create",
+  u: "zip_extract",
+  "@": "select_pattern",
+  "Shift+@": "select_pattern",
+  "Shift+ArrowUp": "select_range_up",
+  "Shift+ArrowDown": "select_range_down",
+  "Shift+Home": "select_range_top",
+  "Shift+End": "select_range_bottom",
+  "Shift+PageUp": "select_range_page_up",
+  "Shift+PageDown": "select_range_page_down",
+  "Shift+r": "bulk_rename",
+  "Shift+x": "external_commands",
+  f: "filter",
+  "Shift+ ": "toggle_select_up",
 };
 
 const [keybinds, setKeybinds] = createSignal<Record<string, string>>({
@@ -581,6 +641,7 @@ export async function saveSettings(s: AppSettings) {
     applySettingsToDOM(s);
   } catch (e) {
     console.error("Failed to save settings:", e);
+    throw e;
   }
 }
 
@@ -592,6 +653,7 @@ export async function saveKeybinds(kb: Record<string, string>) {
     setKeybinds(kb);
   } catch (e) {
     console.error("Failed to save keybinds:", e);
+    throw e;
   }
 }
 

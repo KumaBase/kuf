@@ -43,7 +43,7 @@ const StatusBar: Component<StatusBarProps> = (props) => {
       </Show>
       <span class="status-selected">
         {activeState().selectedIndices.length > 0
-          ? `${activeState().selectedIndices.length} 件選択`
+          ? `${activeState().selectedIndices.length} 件選択 ｜ ${formatSize(activeState().selectedIndices.reduce((total, index) => total + (activeState().files[index]?.is_dir ? 0 : activeState().files[index]?.size ?? 0), 0))}（ファイル合計）`
           : ""}
       </span>
       <span class="status-cursor">

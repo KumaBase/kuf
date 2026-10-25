@@ -14,6 +14,16 @@ import DriveDialog from "./components/DriveDialog";
 import MenuBar from "./components/MenuBar";
 import WorkspaceDialog from "./components/WorkspaceDialog";
 import SortDialog from "./components/SortDialog";
+import CommandPalette from "./components/CommandPalette";
+import PatternSelectDialog from "./components/PatternSelectDialog";
+import HistoryDialog from "./components/HistoryDialog";
+import CompareDialog from "./components/CompareDialog";
+import SearchDialog from "./components/SearchDialog";
+import ArchiveDialog from "./components/ArchiveDialog";
+import BulkRenameDialog from "./components/BulkRenameDialog";
+import ExternalCommandsDialog from "./components/ExternalCommandsDialog";
+import type { ExternalCommandContext } from "./external-commands";
+import { compareFilesForSelection } from "./filer-selection";
 import {
   createTabState,
   keybinds,
@@ -32,7 +42,7 @@ import {
 } from "./state";
 import type { Command, Side, ConnectedServer, WorkspaceData, WorkspaceSnapshot, SortKey, SortSpec } from "./types";
 import { joinPath, parentPath, rootPath, isRemotePath, parseRemotePath, buildRemotePath, baseName, remotePathOnly } from "./types";
-import { formatKeyEvent, SORT_LABELS } from "./commands";
+import { ALL_COMMANDS, formatKeyEvent, SORT_LABELS } from "./commands";
 import { focusApp, isTypingTarget, hasDialogOverlay } from "./focus";
 import { createAutoRefresh } from "./auto-refresh";
 import { migemoStatus } from "./migemo";
@@ -88,6 +98,14 @@ function App() {
   const [showDrives, setShowDrives] = createSignal(false);
   const [showWorkspaces, setShowWorkspaces] = createSignal(false);
   const [sortTarget, setSortTarget] = createSignal<PaneActions | null>(null);
+  const [showPalette, setShowPalette] = createSignal(false);
+  const [patternTarget, setPatternTarget] = createSignal<PaneActions | null>(null);
+  const [historyTarget, setHistoryTarget] = createSignal<PaneActions | null>(null);
+  const [compareTarget, setCompareTarget] = createSignal<{ source: PaneActions; target: PaneActions } | null>(null);
+  const [searchTarget, setSearchTarget] = createSignal<PaneActions | null>(null);
+  const [archiveRequest, setArchiveRequest] = createSignal<{ mode: "create" | "extract"; target: string; sources: string[]; pane: PaneActions } | null>(null);
+  const [renameTarget, setRenameTarget] = createSignal<PaneActions | null>(null);
+  const [externalContext, setExternalContext] = createSignal<ExternalCommandContext | null>(null);
   const [workspaceData, setWorkspaceData] = createSignal<WorkspaceData>({ version: 1, last_session: null, workspaces: [] });
   const [sessionReady, setSessionReady] = createSignal(false);
   const [restoring, setRestoring] = createSignal(false);
@@ -213,11 +231,13 @@ function App() {
     return {
       onClick: (index: number, e: MouseEvent) => {
         setActiveSide(side);
+        if (e.shiftKey) { pane.selectRangeTo(index); return; }
+        pane.resetRangeSelection();
         if (e.ctrlKey || e.metaKey) {
           const selected = [...pane.state.selectedIndices];
           const pos = selected.indexOf(index);
           if (pos >= 0) selected.splice(pos, 1);
-          else selected.push(index);
+          else if (pane.state.files[index]?.name !== "..") selected.push(index);
           pane.setState("selectedIndices", selected);
         } else {
           pane.setState("selectedIndices", []);
@@ -227,20 +247,12 @@ function App() {
       onDoubleClick: async (index: number) => {
         setActiveSide(side);
         pane.setState("cursorIndex", index);
-        const file = pane.state.files[index];
-        try {
-          if (file?.is_dir) {
-            if (file.name === "..") {
-              const parent = parentPath(pane.state.path);
-              if (parent !== pane.state.path) await pane.navigateTo(parent);
-            } else {
-              await pane.navigateTo(joinPath(pane.state.path, file.name));
-            }
-          }
-        } catch (e) { flashStatus(`移動エラー: ${e}`); }
+        pane.resetRangeSelection();
+        await executeCommand("enter");
       },
       onContextMenu: (index: number, x: number, y: number) => {
         setActiveSide(side);
+        pane.resetRangeSelection();
         pane.setState("cursorIndex", index);
         const menuW = 260;
         const menuH = 420;
@@ -262,15 +274,19 @@ function App() {
     focusApp();
   }
 
-  async function createNewTab() {
+  async function createNewTab(duplicate = false) {
     if (workspace.tabs().length >= 64) { flashStatus("タブは64個まで開けます"); return; }
     try {
-      const home = await invoke<string>("home_dir");
+      const source = workspace.current();
+      const home = duplicate ? "" : await invoke<string>("home_dir");
+      const leftPath = duplicate ? source.left.state.path : home;
+      const rightPath = duplicate ? source.right.state.path : home;
       if (workspace.tabs().length >= 64) { flashStatus("タブは64個まで開けます"); return; }
       const tab = workspace.add();
-      tab.left.setState("path", home);
-      tab.right.setState("path", home);
-      await Promise.all([tab.left.navigateTo(home, false), tab.right.navigateTo(home, false)]);
+      tab.left.setState("path", leftPath);
+      tab.right.setState("path", rightPath);
+      if (duplicate) tab.setActiveSide(source.activeSide());
+      await Promise.all([tab.left.navigateTo(leftPath, false), tab.right.navigateTo(rightPath, false)]);
     } catch (e) {
       flashStatus(`タブを開けませんでした: ${e}`);
     }
@@ -345,6 +361,8 @@ function App() {
   }
 
   async function handleMenuAction(id: string) {
+    if (loading() || initError() || restoring() || hasDialogOverlay()) return;
+    if (ALL_COMMANDS.includes(id as Command)) { await executeCommand(id as Command); return; }
     const commandMap: Record<string, Command> = {
       workspace_save: "workspace_save",
       workspace_list: "workspace_list",
@@ -445,6 +463,7 @@ function App() {
         showDrives() ||
         showWorkspaces() ||
         sortTarget() ||
+        hasDialogOverlay() ||
         contextMenu()
       ) {
         return;
@@ -796,7 +815,7 @@ function App() {
 
     let idx = matchFrom(start, (name) => name.startsWith(q));
     if (idx < 0) idx = matchFrom(start, (name) => name.includes(q));
-    if (idx >= 0) active.setState("cursorIndex", idx);
+    if (idx >= 0) { active.resetRangeSelection(); active.setState("cursorIndex", idx); }
   }
 
   async function copyText(text: string) {
@@ -810,8 +829,7 @@ function App() {
   async function executeCommand(command: Command) {
     const active = getActive();
 
-    if (dialog()) return;
-    if (restoring()) return;
+    if (loading() || initError() || restoring() || dialog() || hasDialogOverlay()) return;
     if (
       busy() &&
       (command === "copy_to_other" ||
@@ -820,6 +838,10 @@ function App() {
         command === "move_as" ||
         command === "delete" ||
         command === "rename" ||
+        command === "paste" ||
+        command === "zip_create" ||
+        command === "zip_extract" ||
+        command === "bulk_rename" ||
         command === "new_folder" ||
         command === "new_file")
     ) {
@@ -829,6 +851,69 @@ function App() {
 
     try {
       switch (command) {
+        case "command_palette": setShowPalette(true); break;
+        case "settings": setShowSettings(true); break;
+        case "quit": {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          await getCurrentWindow().close();
+          break;
+        }
+        case "toggle_hidden": {
+          const current = settings();
+          if (current) {
+            await saveSettings({ ...current, display: { ...current.display, show_hidden: !current.display.show_hidden } });
+            await refreshPanes([left(), right()]);
+          }
+          break;
+        }
+        case "open_config_dir": {
+          const path = await invoke<string>("config_dir_path");
+          await invoke("open_file", { path });
+          break;
+        }
+        case "paste": await handlePaste(); break;
+        case "tab_duplicate": await createNewTab(true); break;
+        case "history_list": setHistoryTarget(active); break;
+        case "select_pattern": setPatternTarget(active); break;
+        case "select_files": active.selectFiles(); break;
+        case "select_directories": active.selectDirectories(); break;
+        case "select_range_up": active.selectRangeTo(active.state.cursorIndex - 1); break;
+        case "select_range_down": active.selectRangeTo(active.state.cursorIndex + 1); break;
+        case "select_range_top": active.selectRangeTo(0); break;
+        case "select_range_bottom": active.selectRangeTo(active.state.files.length - 1); break;
+        case "select_range_page_up": active.selectRangeTo(active.state.cursorIndex - visibleRowCount()); break;
+        case "select_range_page_down": active.selectRangeTo(active.state.cursorIndex + visibleRowCount()); break;
+        case "compare_panes": setCompareTarget({ source: active, target: getInactive() }); break;
+        case "search_files":
+          if (isRemotePath(active.state.path)) flashStatus("配下の検索はローカルフォルダで使えます");
+          else setSearchTarget(active);
+          break;
+        case "bulk_rename":
+          if (isRemotePath(active.state.path)) flashStatus("一括リネームはローカルフォルダで使えます");
+          else if (active.getSelectedPaths().length) setRenameTarget(active);
+          break;
+        case "external_commands": {
+          if (isRemotePath(active.state.path)) { flashStatus("外部コマンドはローカルフォルダで使えます"); break; }
+          const file = active.state.files[active.state.cursorIndex];
+          setExternalContext({ directory: active.state.path, other_directory: getInactive().state.path,
+            file: file && file.name !== ".." ? joinPath(active.state.path, file.name) : null, selected: active.getSelectedPaths() });
+          break;
+        }
+        case "zip_create": {
+          const sources = active.getSelectedPaths();
+          if (!sources.length) break;
+          if (isRemotePath(active.state.path)) { flashStatus("ZIP操作はローカルフォルダで使えます"); break; }
+          setArchiveRequest({ mode: "create", target: active.state.path, sources, pane: active });
+          break;
+        }
+        case "zip_extract": {
+          const file = active.state.files[active.state.cursorIndex];
+          const other = getInactive();
+          if (isRemotePath(active.state.path) || isRemotePath(other.state.path)) { flashStatus("ZIPの展開元・展開先にはローカルフォルダを選んでください"); break; }
+          if (!file || file.is_dir || !/\.zip$/i.test(file.name)) { flashStatus("展開するZIPファイルにカーソルを合わせてください"); break; }
+          setArchiveRequest({ mode: "extract", target: other.state.path, sources: [joinPath(active.state.path, file.name)], pane: other });
+          break;
+        }
         case "sort":
           setSortTarget(active);
           break;
@@ -863,14 +948,7 @@ function App() {
           const file = active.state.files[active.state.cursorIndex];
           if (file?.is_dir) {
             if (file.name === "..") {
-              const parent = parentPath(active.state.path);
-              if (parent !== active.state.path) {
-                try {
-                  await active.navigateTo(parent);
-                } catch (e) {
-                  flashStatus(`Navigate error: ${e}`);
-                }
-              }
+              await active.navigateParent();
             } else {
               try {
                 await active.navigateTo(joinPath(active.state.path, file.name));
@@ -889,14 +967,7 @@ function App() {
           break;
         }
         case "parent_dir": {
-          const parent = parentPath(active.state.path);
-          if (parent !== active.state.path) {
-            try {
-              await active.navigateTo(parent);
-            } catch (e) {
-              flashStatus(`Navigate error: ${e}`);
-            }
-          }
+          await active.navigateParent();
           break;
         }
         case "go_root": {
@@ -925,6 +996,7 @@ function App() {
         case "toggle_select":
           active.toggleSelect();
           break;
+        case "toggle_select_up": active.toggleSelectUp(); break;
         case "select_all":
           active.selectAll();
           break;
@@ -954,12 +1026,18 @@ function App() {
         case "drive_list":
           setShowDrives(true);
           break;
-        case "sync_to_other":
-          await active.navigateTo(getInactive().state.path);
+        case "sync_to_other": {
+          const other = getInactive(), path = other.state.path, name = other.state.files[other.state.cursorIndex]?.name;
+          if (active.state.path !== path) await active.navigateTo(path);
+          if (name && active.state.path === path) active.setCursorToFile(name);
           break;
-        case "sync_from_other":
-          await getInactive().navigateTo(active.state.path);
+        }
+        case "sync_from_other": {
+          const other = getInactive(), path = active.state.path, name = active.state.files[active.state.cursorIndex]?.name;
+          if (other.state.path !== path) await other.navigateTo(path);
+          if (name && other.state.path === path) other.setCursorToFile(name);
           break;
+        }
         case "tab_new":
           await createNewTab();
           break;
@@ -994,10 +1072,7 @@ function App() {
           if (!file) break;
           if (file.is_dir) {
             if (file.name === "..") {
-              const parent = parentPath(active.state.path);
-              if (parent !== active.state.path) {
-                await active.navigateTo(parent);
-              }
+              await active.navigateParent();
             } else {
               await active.navigateTo(joinPath(active.state.path, file.name));
             }
@@ -1110,7 +1185,7 @@ function App() {
           const displayName = noExt
             ? file.name.slice(0, file.name.length - file.extension.length - 1)
             : file.name;
-          const originalExt = noExt ? `.${file.extension}` : "";
+          const originalExt = noExt ? file.name.slice(file.name.length - file.extension.length - 1) : "";
           setDialog({
             type: "input",
             title: "Rename",
@@ -1241,9 +1316,9 @@ function App() {
           break;
         }
         case "copy_name": {
-          const file = active.state.files[active.state.cursorIndex];
-          if (!file || file.name === "..") break;
-          await copyText(file.name);
+          const paths = active.getSelectedPaths();
+          if (!paths.length) break;
+          await copyText(paths.map(baseName).join("\n"));
           flashStatus("名前をコピーしました");
           break;
         }
@@ -1381,17 +1456,6 @@ function App() {
     if (showWorkspaces()) return;
     if (sortTarget()) return;
 
-    // Ctrl+, = open settings
-    if ((e.ctrlKey || e.metaKey) && e.key === ",") {
-      e.preventDefault();
-      setShowSettings(true);
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && (e.key === "q" || e.key === "Q")) {
-      e.preventDefault();
-      handleMenuAction("quit");
-      return;
-    }
 
     const key = formatKey(e);
     const kb = keybinds();
@@ -1404,12 +1468,6 @@ function App() {
       return;
     }
 
-    // Ctrl+V = paste
-    if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-      e.preventDefault();
-      handlePaste();
-      return;
-    }
 
     // Incremental search: single printable character (no modifiers except Shift)
     if (
@@ -1560,6 +1618,45 @@ function App() {
       <Show when={sortTarget()}>
         {(pane) => <SortDialog value={pane().sort()} onApply={(sort) => applySort(pane(), sort)} onClose={() => setSortTarget(null)} />}
       </Show>
+      <Show when={showPalette()}><CommandPalette onClose={() => setShowPalette(false)} onExecute={(command) => { void executeCommand(command); }} /></Show>
+      <Show when={externalContext()}>{(context) => { const captured = context(); return <ExternalCommandsDialog context={captured} onClose={() => setExternalContext(null)} onRun={(name) => {
+        void invoke("external_command_run", { name, context: captured }).then(() => flashStatus(`起動しました: ${name}`)).catch((error) => flashStatus(`外部コマンド: ${error}`));
+      }} />; }}</Show>
+      <Show when={renameTarget()}>{(pane) => <BulkRenameDialog directory={pane().state.path} files={pane().state.selectedIndices.length ? pane().state.selectedIndices.map((index) => pane().state.files[index]).filter((file) => file && file.name !== "..") : pane().state.files.filter((file, index) => index === pane().state.cursorIndex && file.name !== "..")} existingFiles={pane().state.files} onClose={() => setRenameTarget(null)} onApply={(plan) => {
+        const directory = pane().state.path; setRenameTarget(null);
+        void runOp("名前を変更しています…", async (operationId) => {
+          const result = await invoke<{ completed: { from: string; to: string }[]; pending: { from: string; to: string }[]; error: string | null; cancelled: boolean }>("batch_rename_items", { directory, plan, operationId });
+          if (result.error || result.pending.length) throw new Error(`${result.completed.length} 件変更、${result.pending.length} 件未完了。\n${result.error ?? "処理を停止しました"}\n未完了: ${result.pending.map((item) => item.from).join(", ")}`);
+          flashStatus(`${result.completed.length} 件の名前を変更しました`);
+        }, [directory], true);
+      }} />}</Show>
+      <Show when={patternTarget()}>{(pane) => <PatternSelectDialog caseSensitive={settings()?.sort.case_sensitive ?? false} onClose={() => setPatternTarget(null)} onApply={(pattern, mode) => {
+        pane().selectPattern(pattern, mode); setPatternTarget(null);
+      }} />}</Show>
+      <Show when={historyTarget()}>{(pane) => <HistoryDialog entries={pane().state.history} currentIndex={pane().state.historyIndex} onClose={() => setHistoryTarget(null)} onJump={(index) => {
+        const target = pane(); setHistoryTarget(null); void target.jumpHistory(index).catch((error) => flashStatus(`履歴を開けませんでした: ${error}`));
+      }} />}</Show>
+      <Show when={compareTarget()}>{(pair) => <CompareDialog sourceFiles={pair().source.state.files} targetFiles={pair().target.state.files} sourcePath={pair().source.state.path} targetPath={pair().target.state.path} caseSensitive={settings()?.sort.case_sensitive ?? false} onClose={() => setCompareTarget(null)} onApply={(mode) => {
+        const { source, target } = pair();
+        source.resetRangeSelection();
+        source.setState("selectedIndices", compareFilesForSelection(source.state.files, target.state.files, mode, settings()?.sort.case_sensitive ?? false));
+        setCompareTarget(null);
+        flashStatus(`${source.state.selectedIndices.length} 件を選択しました（表示中のファイル比較）`);
+      }} />}</Show>
+      <Show when={searchTarget()}>{(pane) => <SearchDialog rootPath={pane().state.path} showHidden={settings()?.display.show_hidden ?? true} caseSensitive={settings()?.sort.case_sensitive ?? false} onClose={() => setSearchTarget(null)} onChoose={(result) => {
+        const target = pane(); setSearchTarget(null);
+        void target.navigateTo(result.parent_path).then(() => target.setCursorToFile(result.name)).catch((error) => flashStatus(`検索結果を開けませんでした: ${error}`));
+      }} />}</Show>
+      <Show when={archiveRequest()}>{(request) => <ArchiveDialog mode={request().mode} target={request().target} sources={request().sources} onClose={() => setArchiveRequest(null)} onSubmit={(name) => {
+        const captured = request(); setArchiveRequest(null);
+        void runOp(captured.mode === "create" ? "ZIPに圧縮しています…" : "ZIPを展開しています…", async (operationId) => {
+          const args = captured.mode === "create" ? { sources: captured.sources } : { archivePath: captured.sources[0] };
+          const result = await invoke<{ path: string; entries: number; bytes: number }>(captured.mode === "create" ? "zip_create" : "zip_extract", { ...args, targetDir: captured.target, name, operationId });
+          flashStatus(`${captured.mode === "create" ? "作成" : "展開"}: ${result.path}`);
+        }, [captured.target], true).then((succeeded) => {
+          if (succeeded && captured.pane.state.path === captured.target) captured.pane.setCursorToFile(name);
+        });
+      }} />}</Show>
       <Show when={showConnect()}>
         <ConnectDialog
           onClose={() => {

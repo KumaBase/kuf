@@ -8,6 +8,12 @@ mod terminal;
 mod workspace;
 mod watcher;
 mod trash;
+mod search;
+mod archive;
+mod batch_rename;
+mod external_commands;
+mod preview;
+mod opener;
 
 use fs::local::LocalFs;
 use fs::FileSystem;
@@ -409,27 +415,7 @@ async fn path_exists(path: String) -> Result<bool, String> {
 
 #[tauri::command]
 async fn open_file(path: String) -> Result<(), String> {
-    background::run(move || {
-        let result = {
-            #[cfg(target_os = "macos")]
-            {
-                std::process::Command::new("open").arg(&path).spawn()
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &path])
-                    .spawn()
-            }
-            #[cfg(target_os = "linux")]
-            {
-                std::process::Command::new("xdg-open").arg(&path).spawn()
-            }
-        };
-        result.map_err(|e| format!("Failed to open: {}", e))?;
-        Ok(())
-    })
-    .await
+    background::run(move || opener::open(&path)).await
 }
 
 #[tauri::command]
@@ -1033,7 +1019,19 @@ pub fn run() {
         .manage(ssh::connection::ConnectionManager::new())
         .manage(operation::Operations::default())
         .manage(watcher::DirectoryWatchState::default())
+        .manage(search::SearchState::default())
         .invoke_handler(tauri::generate_handler![
+            search::search_begin,
+            search::search_cancel,
+            search::search_files,
+            archive::zip_create,
+            archive::zip_extract,
+            batch_rename::batch_rename_items,
+            external_commands::external_commands_load,
+            external_commands::external_commands_save,
+            external_commands::external_command_run,
+            preview::read_preview,
+            preview::ssh_read_preview,
             watcher::watch_directories,
             trash::trash_items,
             workspace::workspace_load,
@@ -1064,6 +1062,8 @@ pub fn run() {
             bookmark_add,
             bookmark_remove,
             config::settings_load,
+            config::settings_defaults,
+            config::keybinds_defaults,
             config::settings_save,
             config::settings_reset,
             config::keybinds_load,

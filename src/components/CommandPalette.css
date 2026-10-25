@@ -1,0 +1,7 @@
+.command-palette { width: min(760px, calc(100vw - 40px)); }
+.command-palette > input { width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+.command-results { max-height: min(55vh, 500px); overflow-y: auto; border: 1px solid var(--border); }
+.command-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.command-result[aria-selected="true"] { background: var(--bg-cursor-active); color: var(--text-primary); }
+.command-detail { display: block; font-size: .85em; opacity: .8; margin-top: 3px; }
+.command-keys { flex-shrink: 0; font-size: .8em; opacity: .8; max-width: 40%; text-align: right; }

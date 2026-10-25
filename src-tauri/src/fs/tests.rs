@@ -131,6 +131,50 @@ fn copying_or_moving_a_file_onto_itself_never_modifies_the_source() {
 }
 
 #[test]
+fn rename_rejects_path_changes_and_existing_destinations_without_touching_contents() {
+    let root = Fixture::new();
+    let original = root.path().join("original.TXT");
+    std::fs::write(&original, b"original").unwrap();
+    std::fs::write(root.path().join("occupied"), b"keep").unwrap();
+    for name in ["../escape", "nested/escape", "nested\\escape", ".", "..", "occupied"] {
+        assert!(LocalFs.rename_item(&original, name).is_err(), "{name}");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original");
+        assert_eq!(std::fs::read(root.path().join("occupied")).unwrap(), b"keep");
+    }
+    assert!(LocalFs.rename_item(&original, &"x".repeat(256)).is_err());
+    LocalFs.rename_item(&original, "original.TXT").unwrap();
+    assert_eq!(std::fs::read(&original).unwrap(), b"original");
+    std::fs::create_dir(root.path().join("folder")).unwrap();
+    std::fs::create_dir(root.path().join("other-folder")).unwrap();
+    assert!(LocalFs.rename_item(&root.path().join("folder"), "other-folder").is_err());
+    assert!(root.path().join("folder").is_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_case_only_rename_preserves_file_identity_and_contents() {
+    let root = Fixture::new();
+    let original = root.path().join("Original.TXT");
+    std::fs::write(&original, b"case-only").unwrap();
+    LocalFs.rename_item(&original, "original.txt").unwrap();
+    let names: Vec<_> = std::fs::read_dir(root.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("original.txt")]);
+    assert_eq!(std::fs::read(root.path().join("original.txt")).unwrap(), b"case-only");
+}
+
+#[cfg(unix)]
+#[test]
+fn rename_rejects_a_dangling_symlink_destination() {
+    let root = Fixture::new();
+    let original = root.path().join("original");
+    std::fs::write(&original, b"original").unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing"), root.path().join("dangling")).unwrap();
+    assert!(LocalFs.rename_item(&original, "dangling").is_err());
+    assert_eq!(std::fs::read(&original).unwrap(), b"original");
+    assert!(std::fs::symlink_metadata(root.path().join("dangling")).unwrap().file_type().is_symlink());
+}
+
+#[test]
 fn copying_and_moving_to_a_different_name_in_the_same_directory_still_work() {
     let root = Fixture::new();
     for overwrite in [false, true] {

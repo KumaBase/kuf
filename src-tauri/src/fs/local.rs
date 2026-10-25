@@ -159,11 +159,17 @@ impl FileSystem for LocalFs {
     }
 
     fn rename_item(&self, path: &Path, new_name: &str) -> Result<(), String> {
+        validate_local_rename_name(new_name)?;
+        fs::symlink_metadata(path).map_err(|e| format!("Cannot read source: {e}"))?;
         let parent = path
             .parent()
             .ok_or_else(|| format!("Cannot get parent of: {}", path.display()))?;
         let new_path = parent.join(new_name);
-        fs::rename(path, &new_path).map_err(|e| format!("Rename failed: {}", e))
+        if path.file_name() == Some(std::ffi::OsStr::new(new_name)) { return Ok(()); }
+        if fs::symlink_metadata(&new_path).is_ok() && !is_case_only_alias(path, &new_path) {
+            return Err(format!("Already exists: {new_name}"));
+        }
+        rename_no_replace(path, &new_path)
     }
 
     fn create_dir(&self, path: &Path, name: &str) -> Result<(), String> {
@@ -203,6 +209,66 @@ pub fn validate_item_name(name: &str) -> Result<(), String> {
         return Err("Name cannot contain path separators".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn validate_local_rename_name(name: &str) -> Result<(), String> {
+    validate_item_name(name)?;
+    #[cfg(windows)]
+    if name.encode_utf16().count() > 255 { return Err("File name is too long".into()); }
+    #[cfg(not(windows))]
+    if name.len() > 255 { return Err("File name is too long".into()); }
+    #[cfg(windows)]
+    {
+        if name.ends_with([' ', '.']) || name.chars().any(|c| c < ' ' || "<>:\"|?*".contains(c)) {
+            return Err("Invalid Windows file name".into());
+        }
+        let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$")
+            || matches!(stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")),
+                Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")) {
+            return Err("Reserved Windows file name".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn is_case_only_alias(source: &Path, destination: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let Some(source_name) = source.file_name().and_then(|name| name.to_str()) else { return false; };
+        let Some(target_name) = destination.file_name().and_then(|name| name.to_str()) else { return false; };
+        source_name != target_name && source_name.eq_ignore_ascii_case(target_name)
+            && same_file(source, destination).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    { let _ = (source, destination); false }
+}
+
+// Never fall back to replacing rename: a destination may appear after preflight.
+pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(destination.as_ptr()), MOVE_FILE_FLAGS(0)) }
+            .map_err(|error| format!("Rename without overwrite failed: {error}"))
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        let destination = std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe { libc::renameat2(libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, destination.as_ptr(), libc::RENAME_NOREPLACE) };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 { Ok(()) } else { Err(format!("Rename without overwrite failed: {}", std::io::Error::last_os_error())) }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    { let _ = (source, destination); Err("Renaming without overwrite is unsupported on this platform".into()) }
 }
 
 fn dest_name_for(

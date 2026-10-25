@@ -91,17 +91,27 @@ export default function SettingsDialog(props: {
   } | null>(null);
   const [keyQuery, setKeyQuery] = createSignal("");
   const [keyConflict, setKeyConflict] = createSignal("");
+  const [saving, setSaving] = createSignal(false);
+  const [saveError, setSaveError] = createSignal("");
   let dialogRef!: HTMLDivElement;
 
-  function handleSave() {
-    saveSettings(editSettings());
-    saveKeybinds(editKeybinds());
-    props.onApply();
-    props.onClose();
+  async function handleSave() {
+    if (saving()) return;
+    setSaving(true); setSaveError("");
+    let settingsSaved = false;
+    try {
+      await saveSettings(editSettings());
+      settingsSaved = true;
+      await saveKeybinds(editKeybinds());
+      props.onApply(); props.onClose();
+    } catch (error) { setSaveError(`${settingsSaved ? "表示設定は保存済みですが、キー設定を保存できませんでした" : "設定を保存できませんでした"}: ${error}`); }
+    finally { setSaving(false); }
   }
 
   function handleCancel() {
-    if (initialSettings) applySettingsToDOM(initialSettings);
+    if (saving()) return;
+    const savedSettings = settings() ?? initialSettings;
+    if (savedSettings) applySettingsToDOM(savedSettings);
     props.onClose();
   }
 
@@ -147,7 +157,7 @@ export default function SettingsDialog(props: {
   function assignKey(command: string, key: string, replacing?: string) {
     const kb = { ...editKeybinds() };
     const previous = kb[key];
-    if (replacing) delete kb[replacing];
+    if (replacing) kb[replacing] = "";
     kb[key] = command;
     setEditKeybinds(kb);
     if (previous && previous !== command) {
@@ -159,7 +169,8 @@ export default function SettingsDialog(props: {
 
   function removeKey(key: string) {
     const kb = { ...editKeybinds() };
-    delete kb[key];
+    // An empty value disables a default key after reloading as well.
+    kb[key] = "";
     setEditKeybinds(kb);
   }
 
@@ -200,17 +211,17 @@ export default function SettingsDialog(props: {
   });
 
   function handleResetSettings() {
-    invoke<AppSettings>("settings_reset").then((s) => {
+    invoke<AppSettings>("settings_defaults").then((s) => {
       setEditSettings(s);
       applySettingsToDOM(s);
-    });
+    }).catch((error) => setSaveError(String(error)));
   }
 
   function handleResetKeybinds() {
-    invoke<{ keybind: Record<string, string> }>("keybinds_reset").then((kb) => {
+    invoke<{ keybind: Record<string, string> }>("keybinds_defaults").then((kb) => {
       setEditKeybinds({ ...DEFAULT_KEYBINDS, ...(kb?.keybind ?? {}) });
       setKeyConflict("");
-    });
+    }).catch((error) => setSaveError(String(error)));
   }
 
   const s = editSettings;
@@ -246,6 +257,15 @@ export default function SettingsDialog(props: {
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (capturing()) return;
+          e.stopPropagation();
+          if (e.key === "Tab") {
+            const controls = Array.from(dialogRef.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), textarea:not(:disabled)'));
+            if (controls.length) {
+              e.preventDefault();
+              const index = controls.indexOf(document.activeElement as HTMLElement);
+              controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length]?.focus();
+            }
+          }
           if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -278,7 +298,7 @@ export default function SettingsDialog(props: {
           </button>
         </div>
 
-        <div class="settings-body">
+        <fieldset class="settings-body" disabled={saving()} style={{ border: "none", "min-width": "0" }}>
           <Show when={tab() === "general"}>
             <div class="settings-section">
               <div class="settings-section-title">表示</div>
@@ -721,13 +741,14 @@ export default function SettingsDialog(props: {
               </button>
             </div>
           </Show>
-        </div>
+        </fieldset>
 
         <div class="settings-footer">
-          <button class="dialog-btn" onClick={handleCancel}>
+          <Show when={saveError()}><span role="alert">{saveError()}</span></Show>
+          <button class="dialog-btn" disabled={saving()} onClick={handleCancel}>
             キャンセル
           </button>
-          <button class="dialog-btn btn-ok" onClick={handleSave}>
+          <button class="dialog-btn btn-ok" disabled={saving()} onClick={() => void handleSave()}>
             保存
           </button>
         </div>

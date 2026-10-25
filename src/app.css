@@ -22,6 +22,8 @@
   --chrome-size: 16px;
 }
 
+.app-menu-dropdown { max-height: calc(100vh - 70px); overflow-y: auto; }
+
 * {
   margin: 0;
   padding: 0;

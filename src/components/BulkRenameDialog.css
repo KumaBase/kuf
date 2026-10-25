@@ -1,0 +1,11 @@
+.bulk-rename-dialog { width: min(850px, calc(100vw - 40px)); max-height: calc(100vh - 40px); display: flex; flex-direction: column; overflow: auto; }
+.bulk-rename-fields { display: flex; gap: 14px; flex-wrap: wrap; }
+.bulk-rename-fields .settings-field { flex: 1; min-width: 130px; }
+.bulk-rename-fields input { width: 100%; box-sizing: border-box; }
+.bulk-rename-preview { min-height: 100px; max-height: 34vh; overflow: auto; border: 1px solid var(--border); }
+.bulk-rename-preview table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.bulk-rename-preview th, .bulk-rename-preview td { padding: 6px 9px; text-align: left; overflow-wrap: anywhere; vertical-align: top; border-bottom: 1px solid var(--border); }
+.bulk-rename-preview th { position: sticky; top: 0; background: var(--bg-secondary); }
+.bulk-rename-unchanged { color: var(--text-secondary); }
+.bulk-rename-error { display: block; color: var(--accent); overflow-wrap: anywhere; margin-top: 3px; }
+.bulk-rename-invalid { background: var(--bg-selected); }

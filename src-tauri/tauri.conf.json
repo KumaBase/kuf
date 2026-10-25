@@ -1,6 +1,6 @@
 {
   "productName": "kuf",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.kuma.kuf",
   "build": {
     "frontendDist": "../dist",
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost blob:",
       "assetProtocol": {
         "enable": true,
         "scope": {
