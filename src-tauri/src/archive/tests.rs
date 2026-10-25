@@ -43,6 +43,129 @@ fn make_zip(path: &Path, entries: &[(&str, &[u8])]) {
     writer.finish().unwrap();
 }
 
+fn make_privileged_mode_zip(path: &Path) {
+    let mut writer = ZipWriter::new(File::create(path).unwrap());
+    writer
+        .start_file(
+            "script.sh",
+            SimpleFileOptions::default()
+                .system(zip::System::Unix)
+                .external_attributes((0o100000 | 0o7755) << 16),
+        )
+        .unwrap();
+    writer.write_all(b"#!/bin/sh\nprintf 'kept'\n").unwrap();
+    writer
+        .start_file(
+            "plain.txt",
+            SimpleFileOptions::default()
+                .system(zip::System::Unix)
+                .external_attributes(0),
+        )
+        .unwrap();
+    writer.write_all(b"no stored permissions").unwrap();
+    writer.finish().unwrap();
+}
+
+#[test]
+fn extraction_plan_retains_only_ordinary_permission_bits() {
+    let root = Fixture::new();
+    make_privileged_mode_zip(&root.path("permissions.zip"));
+    let mut archive = ZipArchive::new(File::open(root.path("permissions.zip")).unwrap()).unwrap();
+    assert_eq!(
+        (archive.by_index(0).unwrap().external_attributes() >> 16) & 0o7777,
+        0o7755
+    );
+    let (entries, _) = extract_plan(&mut archive, LIMITS, &|| Ok(())).unwrap();
+    assert_eq!(entries[0].permissions, Some(0o755));
+    assert_eq!(entries[1].permissions, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_file_permissions_survive_zip_creation_and_extraction() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = Fixture::new();
+    let script = root.path("script.sh");
+    let content = b"#!/bin/sh\nprintf 'round trip'\n";
+    fs::write(&script, content).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    create_zip(
+        &[script.clone()],
+        &root.0,
+        "script.zip",
+        LIMITS,
+        &|| Ok(()),
+        &mut |_, _| {},
+    )
+    .unwrap();
+    extract_zip(
+        &root.path("script.zip"),
+        &root.0,
+        "output",
+        LIMITS,
+        &|| Ok(()),
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::metadata(root.path("output/script.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o755
+    );
+    assert_eq!(fs::read(root.path("output/script.sh")).unwrap(), content);
+    assert_eq!(
+        fs::metadata(&script).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert_eq!(fs::read(script).unwrap(), content);
+}
+
+#[cfg(unix)]
+#[test]
+fn extraction_discards_privileged_bits_after_writing_file_contents() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = Fixture::new();
+    let source = root.path("permissions.zip");
+    make_privileged_mode_zip(&source);
+    // Compare an ordinary created file instead of mutating process-wide umask
+    // while other tests may be running in parallel.
+    let control = root.path("default-permissions.txt");
+    fs::write(&control, b"control").unwrap();
+    let default_mode = fs::metadata(control).unwrap().permissions().mode() & 0o777;
+    let original = fs::read(&source).unwrap();
+    extract_zip(
+        &source,
+        &root.0,
+        "output",
+        LIMITS,
+        &|| Ok(()),
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let path = root.path("output/script.sh");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"#!/bin/sh\nprintf 'kept'\n");
+    assert_eq!(
+        fs::metadata(root.path("output/plain.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        default_mode
+    );
+    assert_eq!(
+        fs::read(root.path("output/plain.txt")).unwrap(),
+        b"no stored permissions"
+    );
+    assert_eq!(fs::read(source).unwrap(), original);
+}
+
 #[test]
 fn nested_unicode_and_empty_directories_round_trip_without_changing_sources() {
     let root = Fixture::new();

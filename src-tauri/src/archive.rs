@@ -415,6 +415,11 @@ fn create_zip(
                 .compression_method(CompressionMethod::Deflated)
                 .last_modified_time(zip_time(&entry.metadata))
                 .large_file(entry.metadata.len() > u32::MAX as u64);
+            #[cfg(unix)]
+            let options = {
+                use std::os::unix::fs::PermissionsExt;
+                options.unix_permissions(entry.metadata.permissions().mode() & 0o777)
+            };
             if entry.metadata.is_dir() {
                 writer
                     .add_directory(format!("{name}/"), options)
@@ -448,6 +453,7 @@ struct ExtractEntry {
     directory: bool,
     size: u64,
     modified: Option<zip::DateTime>,
+    permissions: Option<u32>,
 }
 
 fn extract_plan<R: Read + std::io::Seek>(
@@ -490,6 +496,8 @@ fn extract_plan<R: Read + std::io::Seek>(
             directory: file.is_dir(),
             size: file.size(),
             modified: file.last_modified(),
+            // File-type and privileged bits are never restored from an archive.
+            permissions: file.unix_mode().map(|mode| mode & 0o777),
         });
     }
     Ok((entries, total))
@@ -558,6 +566,18 @@ fn restore_modified(file: &File, time: Option<zip::DateTime>) -> Result<(), Stri
                 .map_err(|error| format!("更新日時を設定できません: {error}"))?;
         }
     }
+    Ok(())
+}
+
+fn restore_permissions(file: &File, mode: Option<u32>) -> Result<(), String> {
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+            .map_err(|error| format!("ファイルの権限を設定できません: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (file, mode);
     Ok(())
 }
 
@@ -679,6 +699,7 @@ fn extract_zip(
                 let mut input = archive.by_index(index).map_err(|error| error.to_string())?;
                 copy_limited(&mut input, &mut output, entry.size, check)?;
                 restore_modified(&output, entry.modified)?;
+                restore_permissions(&output, entry.permissions)?;
                 output.sync_all().map_err(|error| error.to_string())?;
             }
             progress(index + 1, entries.len());
