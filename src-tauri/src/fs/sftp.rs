@@ -69,13 +69,14 @@ impl SftpFs {
                     .unwrap_or_default()
             };
 
-            let modified = metadata.modified().ok().map(|t| {
-                let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                let dt = chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
-                    .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
-                let local_dt: chrono::DateTime<chrono::Local> = dt.into();
-                local_dt.format("%Y-%m-%d %H:%M").to_string()
-            });
+            let (modified, modified_timestamp) = metadata
+                .modified()
+                .ok()
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Local> = t.into();
+                    (dt.format("%Y-%m-%d %H:%M").to_string(), dt.timestamp_millis())
+                })
+                .unzip();
 
             let permissions = Self::format_permissions(&metadata.permissions());
 
@@ -84,6 +85,7 @@ impl SftpFs {
                 is_dir,
                 size,
                 modified,
+                modified_timestamp,
                 extension,
                 is_hidden,
                 is_symlink,
@@ -98,6 +100,7 @@ impl SftpFs {
                 is_dir: true,
                 size: 0,
                 modified: None,
+                modified_timestamp: None,
                 extension: String::new(),
                 is_hidden: false,
                 is_symlink: false,

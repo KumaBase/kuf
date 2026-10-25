@@ -53,16 +53,24 @@ impl FileSystem for LocalFs {
                     .unwrap_or_default()
             };
 
-            let modified = effective.modified().ok().map(|t| {
-                let dt: DateTime<Local> = t.into();
-                dt.format("%Y-%m-%d %H:%M").to_string()
-            });
+            let (modified, modified_timestamp) = effective
+                .modified()
+                .ok()
+                .map(|t| {
+                    let dt: DateTime<Local> = t.into();
+                    (
+                        dt.format("%Y-%m-%d %H:%M").to_string(),
+                        dt.timestamp_millis(),
+                    )
+                })
+                .unzip();
 
             files.push(FileInfo {
                 name,
                 is_dir,
                 size,
                 modified,
+                modified_timestamp,
                 extension,
                 is_hidden,
                 is_symlink,
@@ -77,6 +85,7 @@ impl FileSystem for LocalFs {
                 is_dir: true,
                 size: 0,
                 modified: None,
+                modified_timestamp: None,
                 extension: String::new(),
                 is_hidden: false,
                 is_symlink: false,

@@ -1,6 +1,7 @@
 import { createSignal, createEffect, onMount, onCleanup, untrack, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import Pane from "./components/Pane";
 import StatusBar from "./components/StatusBar";
 import Dialog from "./components/Dialog";
@@ -12,6 +13,7 @@ import ConnectDialog from "./components/ConnectDialog";
 import DriveDialog from "./components/DriveDialog";
 import MenuBar from "./components/MenuBar";
 import WorkspaceDialog from "./components/WorkspaceDialog";
+import SortDialog from "./components/SortDialog";
 import {
   createTabState,
   keybinds,
@@ -28,15 +30,28 @@ import {
   rowHeight,
   type PaneActions,
 } from "./state";
-import type { Command, Side, ConnectedServer, WorkspaceData, WorkspaceSnapshot } from "./types";
+import type { Command, Side, ConnectedServer, WorkspaceData, WorkspaceSnapshot, SortKey, SortSpec } from "./types";
 import { joinPath, parentPath, rootPath, isRemotePath, parseRemotePath, buildRemotePath, baseName, remotePathOnly } from "./types";
-import { formatKeyEvent } from "./commands";
+import { formatKeyEvent, SORT_LABELS } from "./commands";
 import { focusApp, isTypingTarget, hasDialogOverlay } from "./focus";
 import { createAutoRefresh } from "./auto-refresh";
 import { migemoStatus } from "./migemo";
 
 function App() {
   const workspace = createTabState();
+  let sortPreferences = "";
+  createEffect(() => {
+    const preferences = settings()?.sort;
+    const signature = preferences ? `${preferences.dirs_first}/${preferences.case_sensitive}` : "";
+    if (!preferences || signature === sortPreferences) return;
+    sortPreferences = signature;
+    untrack(() => {
+      for (const tab of workspace.tabs()) {
+        tab.left.resort();
+        tab.right.resort();
+      }
+    });
+  });
   createEffect(() => {
     if (migemoStatus() === "ready") untrack(() => {
       for (const tab of workspace.tabs()) {
@@ -72,6 +87,7 @@ function App() {
   const [showConnect, setShowConnect] = createSignal(false);
   const [showDrives, setShowDrives] = createSignal(false);
   const [showWorkspaces, setShowWorkspaces] = createSignal(false);
+  const [sortTarget, setSortTarget] = createSignal<PaneActions | null>(null);
   const [workspaceData, setWorkspaceData] = createSignal<WorkspaceData>({ version: 1, last_session: null, workspaces: [] });
   const [sessionReady, setSessionReady] = createSignal(false);
   const [restoring, setRestoring] = createSignal(false);
@@ -119,6 +135,14 @@ function App() {
     activeSide() === "left" ? left() : right();
   const getInactive = (): PaneActions =>
     activeSide() === "left" ? right() : left();
+
+  function applySort(pane: PaneActions, sort: SortSpec) {
+    pane.setSort(sort);
+    resetSearch();
+    setSearchDisplay("");
+    flashStatus(`${SORT_LABELS[sort.key]}・${sort.order === "asc" ? "昇順" : "降順"}`);
+    focusApp();
+  }
 
   const visibleLocalPanes = () => [left(), right()].filter((pane) => pane.state.path && !isRemotePath(pane.state.path));
   const [watchErrors, setWatchErrors] = createSignal<Record<string, string>>({});
@@ -325,6 +349,12 @@ function App() {
       workspace_save: "workspace_save",
       workspace_list: "workspace_list",
       filter: "filter",
+      sort: "sort",
+      sort_name: "sort_name",
+      sort_extension: "sort_extension",
+      sort_size: "sort_size",
+      sort_modified: "sort_modified",
+      sort_reverse: "sort_reverse",
       new_folder: "new_folder",
       copy: "copy",
       move: "move",
@@ -352,7 +382,7 @@ function App() {
       setDialog({
         type: "message",
         title: "kuf について",
-        message: "kuf - 2ペイン ファイルマネージャ\nVersion 0.1.1",
+        message: `kuf - 2ペイン ファイルマネージャ\nVersion ${await getVersion()}`,
         onOk: () => setDialog(null),
         onCancel: () => setDialog(null),
       });
@@ -414,6 +444,7 @@ function App() {
         showConnect() ||
         showDrives() ||
         showWorkspaces() ||
+        sortTarget() ||
         contextMenu()
       ) {
         return;
@@ -798,6 +829,18 @@ function App() {
 
     try {
       switch (command) {
+        case "sort":
+          setSortTarget(active);
+          break;
+        case "sort_name":
+        case "sort_extension":
+        case "sort_size":
+        case "sort_modified":
+          applySort(active, { key: command.slice(5) as SortKey, order: active.sort().order });
+          break;
+        case "sort_reverse":
+          applySort(active, { ...active.sort(), order: active.sort().order === "asc" ? "desc" : "asc" });
+          break;
         case "cursor_up":
           active.cursorUp();
           break;
@@ -1336,6 +1379,7 @@ function App() {
     if (showConnect()) return;
     if (showDrives()) return;
     if (showWorkspaces()) return;
+    if (sortTarget()) return;
 
     // Ctrl+, = open settings
     if ((e.ctrlKey || e.metaKey) && e.key === ",") {
@@ -1395,7 +1439,7 @@ function App() {
         <div class="error">{initError()}</div>
       </Show>
       <Show when={!loading() && !initError()}>
-        <MenuBar servers={connectedServers()} onAction={handleMenuAction} />
+        <MenuBar servers={connectedServers()} sort={getActive().sort()} onAction={handleMenuAction} />
         <TabBar
           tabs={tabs()}
           activeIndex={activeTabIndex()}
@@ -1406,6 +1450,8 @@ function App() {
         <div class="panes">
           <Pane
             side="left"
+            sort={left().sort()}
+            onSort={() => { setActiveSide("left"); setSortTarget(left()); }}
             state={left().state}
             loading={left().loading()}
             loadError={left().loadError()}
@@ -1425,6 +1471,8 @@ function App() {
           />
           <Pane
             side="right"
+            sort={right().sort()}
+            onSort={() => { setActiveSide("right"); setSortTarget(right()); }}
             state={right().state}
             loading={right().loading()}
             loadError={right().loadError()}
@@ -1508,6 +1556,9 @@ function App() {
           onRestore={(snapshot) => { setShowWorkspaces(false); void restoreWorkspace(snapshot); }}
           onRemove={(name) => { void removeWorkspace(name); }}
         />
+      </Show>
+      <Show when={sortTarget()}>
+        {(pane) => <SortDialog value={pane().sort()} onApply={(sort) => applySort(pane(), sort)} onClose={() => setSortTarget(null)} />}
       </Show>
       <Show when={showConnect()}>
         <ConnectDialog

@@ -186,6 +186,8 @@ fn default_keybinds_toml() -> String {
 "Ctrl+Shift+c" = "copy_path"
 "Ctrl+Shift+n" = "copy_name"
 "Ctrl+Shift+Enter" = "open_terminal"
+"Ctrl+Shift+s" = "sort"
+"Ctrl+Shift+r" = "sort_reverse"
 "Alt+Home" = "go_home"
 "Alt+ArrowLeft" = "history_back"
 "Alt+ArrowRight" = "history_forward"
@@ -373,13 +375,15 @@ mod tests {
                 .map(|value| format!("preset = '{value}'\r\n"))
                 .unwrap_or_default();
             let original = format!(
-                "# My shortcuts must survive upgrades.\r\n{marker}[keybind]\r\n'F5' = 'preview'\r\n'Ctrl+q' = 'copy_path'\r\n"
+                "# My shortcuts must survive upgrades.\r\n{marker}[keybind]\r\n'F5' = 'preview'\r\n'Ctrl+q' = 'copy_path'\r\n'Ctrl+Shift+s' = 'preview'\r\n'Ctrl+Shift+r' = 'copy_path'\r\n"
             );
             fs::write(&path, original.as_bytes()).unwrap();
             for _ in 0..2 {
                 let map = keybinds_load_from(&path).unwrap();
                 assert_eq!(map["keybind"]["F5"], "preview");
                 assert_eq!(map["keybind"]["Ctrl+q"], "copy_path");
+                assert_eq!(map["keybind"]["Ctrl+Shift+s"], "preview");
+                assert_eq!(map["keybind"]["Ctrl+Shift+r"], "copy_path");
                 assert_eq!(map.get("preset").and_then(|value| value.as_str()), preset);
                 assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
             }
@@ -422,6 +426,8 @@ mod tests {
         let keybinds = keybinds_load_from(&keybinds_path).unwrap();
         assert_eq!(keybinds["preset"], "afxw-2");
         assert_eq!(keybinds["keybind"]["F5"], "copy_to_other");
+        assert_eq!(keybinds["keybind"]["Ctrl+Shift+s"], "sort");
+        assert_eq!(keybinds["keybind"]["Ctrl+Shift+r"], "sort_reverse");
         assert_eq!(
             fs::read_to_string(keybinds_path).unwrap(),
             default_keybinds_toml()

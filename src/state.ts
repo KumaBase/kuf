@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { createStore } from "solid-js/store";
 import { batch, createSignal } from "solid-js";
-import type { FileInfo, PaneState, Side, AppSettings, WorkspaceSnapshot } from "./types";
+import type { FileInfo, PaneState, Side, AppSettings, WorkspaceSnapshot, SortSpec } from "./types";
 import {
   joinPath,
   parentPath,
@@ -22,8 +22,9 @@ const EMPTY_PANE: PaneState = {
   historyIndex: -1,
 };
 
-export function createPaneState() {
+export function createPaneState(initialSort: SortSpec = { key: "name", order: "asc" }) {
   const [state, setState] = createStore<PaneState>({ ...EMPTY_PANE });
+  const [sort, changeSort] = createSignal<SortSpec>({ ...initialSort });
   const [loading, setLoading] = createSignal(false);
   const [loadError, setLoadError] = createSignal("");
   const [filterQuery, setFilterQuery] = createSignal("");
@@ -35,7 +36,12 @@ export function createPaneState() {
   let preparedListing: { file: FileInfo; name: PreparedName; index: number }[] | null = null;
   let navGen = 0;
 
-  const setListing = (files: FileInfo[]) => { listing = files; preparedListing = null; };
+  const setListing = (files: FileInfo[]) => {
+    const preferences = settings()?.sort;
+    listing = sortFiles(files, preferences?.dirs_first ?? true, preferences?.case_sensitive ?? false, sort());
+    preparedListing = null;
+    return listing;
+  };
   const setFilterOpen = (open: boolean) => {
     changeFilterOpen(open);
     if (open) void ensureMigemo();
@@ -82,11 +88,23 @@ export function createPaneState() {
   };
   const closeFilter = () => { setFilter(""); setFilterOpen(false); };
 
+  const resort = () => {
+    setListing(listing);
+    showListing();
+  };
+
+  const setSort = (next: SortSpec) => {
+    if (next.key === sort().key && next.order === sort().order) return;
+    batch(() => {
+      changeSort({ ...next });
+      resort();
+    });
+  };
+
   const applyListing = (files: FileInfo[]): FileInfo[] => {
-    const sort = settings()?.sort;
     let listed = files;
     if (!showHidden()) listed = listed.filter((f) => !f.is_hidden);
-    return sortFiles(listed, sort?.dirs_first ?? true, sort?.case_sensitive ?? false);
+    return listed;
   };
 
   const fetchFiles = async (path: string): Promise<FileInfo[]> => {
@@ -121,9 +139,9 @@ export function createPaneState() {
   };
 
   const navigateTo = async (path: string, addToHistory = true) => {
-    const files = await requestFiles(path);
-    if (!files) return;
-    setListing(files);
+    const requested = await requestFiles(path);
+    if (!requested) return;
+    const files = setListing(requested);
     setTotalCount(files.filter((file) => file.name !== "..").length);
     setFilterQuery("");
     setFilterHighlights(new Map());
@@ -211,9 +229,9 @@ export function createPaneState() {
 
   const refresh = async () => {
     if (!state.path) return;
-    const files = await requestFiles(state.path);
-    if (!files) return;
-    setListing(files);
+    const requested = await requestFiles(state.path);
+    if (!requested) return;
+    const files = setListing(requested);
     setTotalCount(files.filter((file) => file.name !== "..").length);
     showListing();
   };
@@ -228,9 +246,9 @@ export function createPaneState() {
     const nextIndex = state.historyIndex - 1;
     const entry = newHistory[nextIndex];
     if (!entry) return;
-    const files = await requestFiles(entry.path);
-    if (!files) return;
-    setListing(files);
+    const requested = await requestFiles(entry.path);
+    if (!requested) return;
+    const files = setListing(requested);
     setTotalCount(files.filter((file) => file.name !== "..").length);
     setFilterQuery("");
     setFilterHighlights(new Map());
@@ -255,9 +273,9 @@ export function createPaneState() {
     const nextIndex = state.historyIndex + 1;
     const entry = newHistory[nextIndex];
     if (!entry) return;
-    const files = await requestFiles(entry.path);
-    if (!files) return;
-    setListing(files);
+    const requested = await requestFiles(entry.path);
+    if (!requested) return;
+    const files = setListing(requested);
     setTotalCount(files.filter((file) => file.name !== "..").length);
     setFilterQuery("");
     setFilterHighlights(new Map());
@@ -306,6 +324,9 @@ export function createPaneState() {
 
   return {
     state,
+    sort,
+    setSort,
+    resort,
     loading,
     loadError,
     filterQuery,
@@ -344,8 +365,8 @@ export type PaneActions = ReturnType<typeof createPaneState>;
 // Each tab owns its panes, including pending navigation. Switching tabs only
 // changes the active reference; large listings are never serialized or copied.
 export function createTabState() {
-  function createTab() {
-    const [panes, setPanes] = createSignal({ left: createPaneState(), right: createPaneState() });
+  function createTab(leftSort?: SortSpec, rightSort?: SortSpec) {
+    const [panes, setPanes] = createSignal({ left: createPaneState(leftSort), right: createPaneState(rightSort) });
     const [activeSide, setActiveSide] = createSignal<Side>("left");
     return {
       id: crypto.randomUUID(),
@@ -363,7 +384,7 @@ export function createTabState() {
     if (index >= 0 && index < tabs().length) setActiveIndex(index);
   };
   const add = () => {
-    const tab = createTab();
+    const tab = createTab(current().left.sort(), current().right.sort());
     batch(() => {
       setTabs((prev) => [...prev, tab]);
       setActiveIndex(tabs().length - 1);
@@ -379,13 +400,16 @@ export function createTabState() {
     });
   };
   const snapshot = (): WorkspaceSnapshot | null => {
-    const saved = tabs().map((tab) => ({ left_path: tab.left.state.path, right_path: tab.right.state.path, active_side: tab.activeSide() }));
+    const saved = tabs().map((tab) => ({
+      left_path: tab.left.state.path, right_path: tab.right.state.path, active_side: tab.activeSide(),
+      left_sort: { ...tab.left.sort() }, right_sort: { ...tab.right.sort() },
+    }));
     if (saved.some((tab) => !tab.left_path || !tab.right_path)) return null;
     return { tabs: saved, active_index: activeIndex() };
   };
   const restore = (snapshot: WorkspaceSnapshot) => {
     const restored = snapshot.tabs.map((saved) => {
-      const tab = createTab();
+      const tab = createTab(saved.left_sort, saved.right_sort);
       tab.left.setState({ path: saved.left_path, history: [{ path: saved.left_path, cursorIndex: 0 }], historyIndex: 0 });
       tab.right.setState({ path: saved.right_path, history: [{ path: saved.right_path, cursorIndex: 0 }], historyIndex: 0 });
       tab.setActiveSide(saved.active_side);
@@ -517,6 +541,8 @@ export const DEFAULT_KEYBINDS: Record<string, string> = {
   "Ctrl+s": "ssh_connect",
   "/": "filter",
   "Ctrl+f": "filter",
+  "Ctrl+Shift+s": "sort",
+  "Ctrl+Shift+r": "sort_reverse",
 };
 
 const [keybinds, setKeybinds] = createSignal<Record<string, string>>({

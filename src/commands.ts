@@ -1,4 +1,8 @@
-import type { Command } from "./types";
+import type { Command, SortKey } from "./types";
+
+export const SORT_LABELS: Record<SortKey, string> = {
+  name: "名前", extension: "拡張子", size: "サイズ", modified: "更新日時",
+};
 
 export interface CommandInfo {
   id: Command;
@@ -10,6 +14,7 @@ export interface CommandInfo {
 export const COMMAND_GROUPS = [
   "移動",
   "選択",
+  "表示",
   "ファイル操作",
   "ペイン",
   "タブ",
@@ -32,6 +37,13 @@ export const COMMAND_CATALOG: CommandInfo[] = [
   { id: "go_home", label: "ホームへ", group: "移動", description: "ホームディレクトリを開く" },
   { id: "goto_path", label: "パスへ移動", group: "移動", description: "入力したパスへジャンプ" },
   { id: "filter", label: "一覧を絞り込む", group: "移動", description: "部分一致・*・?でファイル名を絞り込む" },
+
+  { id: "sort", label: "ソート方法を選択", group: "表示", description: "操作中のペインの並び順を選ぶ" },
+  { id: "sort_name", label: "名前でソート", group: "表示", description: "操作中のペインを名前順にする" },
+  { id: "sort_extension", label: "拡張子でソート", group: "表示", description: "操作中のペインを拡張子順にする" },
+  { id: "sort_size", label: "サイズでソート", group: "表示", description: "操作中のペインをファイルサイズ順にする" },
+  { id: "sort_modified", label: "更新日時でソート", group: "表示", description: "操作中のペインを更新日時順にする" },
+  { id: "sort_reverse", label: "ソート順を反転", group: "表示", description: "操作中のペインの昇順・降順を切り替える" },
 
   { id: "toggle_select", label: "選択切替", group: "選択", description: "カーソル位置の選択を切替" },
   { id: "select_all", label: "すべて選択", group: "選択", description: "表示中の項目をすべて選択" },

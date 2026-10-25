@@ -135,6 +135,8 @@ pub struct FileInfo {
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<String>,
+    #[serde(default)]
+    pub modified_timestamp: Option<i64>,
     pub extension: String,
     pub is_hidden: bool,
     pub is_symlink: bool,

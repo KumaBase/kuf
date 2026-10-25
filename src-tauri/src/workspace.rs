@@ -13,12 +13,39 @@ const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 static STORAGE_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SortKey {
+    Name,
+    Extension,
+    Size,
+    Modified,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SortSpec {
+    pub key: SortKey,
+    pub order: SortOrder,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceTab {
     pub left_path: String,
     pub right_path: String,
     pub active_side: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_sort: Option<SortSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_sort: Option<SortSpec>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -307,6 +334,8 @@ mod tests {
                 left_path: "C:\\作業\\資料".to_string(),
                 right_path: "sftp://user@example.test:22/unavailable".to_string(),
                 active_side: "right".to_string(),
+                left_sort: None,
+                right_sort: None,
             }],
             active_index: 0,
         }
@@ -337,6 +366,125 @@ mod tests {
         save_to_path(&directory.path(), &data).unwrap();
         assert_eq!(load_from_path(&directory.path()).unwrap(), data);
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn legacy_session_and_named_workspaces_load_without_rewriting_or_adding_sort_fields() {
+        let directory = TestDirectory::new();
+        let original = concat!(
+            "{\r\n  \"version\": 1,\r\n",
+            "  \"last_session\": {\"tabs\":[{\"left_path\":\"/left\",\"right_path\":\"/right\",\"active_side\":\"left\"}],\"active_index\":0},\r\n",
+            "  \"workspaces\": [{\"name\":\"Legacy\",\"snapshot\":{\"tabs\":[{\"left_path\":\"/saved/left\",\"right_path\":\"/saved/right\",\"active_side\":\"right\"}],\"active_index\":0}}]\r\n",
+            "}\r\n"
+        );
+        fs::write(directory.path(), original).unwrap();
+        for _ in 0..2 {
+            let data = load_from_path(&directory.path()).unwrap();
+            let session_tab = &data.last_session.as_ref().unwrap().tabs[0];
+            let named_tab = &data.workspaces[0].snapshot.tabs[0];
+            for tab in [session_tab, named_tab] {
+                assert_eq!(tab.left_sort, None);
+                assert_eq!(tab.right_sort, None);
+                let value = serde_json::to_value(tab).unwrap();
+                assert!(value.get("left_sort").is_none());
+                assert!(value.get("right_sort").is_none());
+            }
+            assert_eq!(fs::read(directory.path()).unwrap(), original.as_bytes());
+        }
+        let data = load_from_path(&directory.path()).unwrap();
+        save_to_path(&directory.path(), &data).unwrap();
+        assert_eq!(load_from_path(&directory.path()).unwrap(), data);
+    }
+
+    #[test]
+    fn session_and_named_sorts_round_trip_independently_with_snake_case_values() {
+        let directory = TestDirectory::new();
+        for (key, key_name) in [
+            (SortKey::Name, "name"),
+            (SortKey::Extension, "extension"),
+            (SortKey::Size, "size"),
+            (SortKey::Modified, "modified"),
+        ] {
+            for (order, order_name) in [(SortOrder::Asc, "asc"), (SortOrder::Desc, "desc")] {
+                let mut session = snapshot();
+                session.tabs[0].left_sort = Some(SortSpec { key, order });
+                session.tabs[0].right_sort = Some(SortSpec {
+                    key: SortKey::Modified,
+                    order: SortOrder::Desc,
+                });
+                let mut named = snapshot();
+                named.tabs[0].right_sort = Some(SortSpec { key, order });
+                let data = WorkspaceData {
+                    last_session: Some(session),
+                    workspaces: vec![NamedWorkspace {
+                        name: "Independent panes".to_string(),
+                        snapshot: named,
+                    }],
+                    ..WorkspaceData::default()
+                };
+                save_to_path(&directory.path(), &data).unwrap();
+                let content = fs::read(directory.path()).unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&content).unwrap();
+                let encoded = serde_json::json!({ "key": key_name, "order": order_name });
+                assert_eq!(value["last_session"]["tabs"][0]["left_sort"], encoded);
+                assert_eq!(
+                    value["workspaces"][0]["snapshot"]["tabs"][0]["right_sort"],
+                    encoded
+                );
+                assert!(value["workspaces"][0]["snapshot"]["tabs"][0]
+                    .get("left_sort")
+                    .is_none());
+                assert_eq!(load_from_path(&directory.path()).unwrap(), data);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_pane_sorts_are_rejected_and_existing_bytes_survive_attempted_updates() {
+        let directory = TestDirectory::new();
+        for field in ["left_sort", "right_sort"] {
+            for invalid in [
+                serde_json::json!({ "key": "unknown", "order": "asc" }),
+                serde_json::json!({ "key": "name", "order": "unknown" }),
+                serde_json::json!({ "key": "name", "order": "ASC" }),
+                serde_json::json!({ "key": "name" }),
+                serde_json::json!({ "order": "asc" }),
+                serde_json::json!({ "key": "size", "order": "asc", "unexpected": true }),
+                serde_json::json!("name"),
+                serde_json::json!({ "key": 1, "order": "asc" }),
+            ] {
+                for named in [false, true] {
+                    let mut data = serde_json::to_value(WorkspaceData {
+                        last_session: Some(snapshot()),
+                        workspaces: vec![NamedWorkspace {
+                            name: "Preserved".to_string(),
+                            snapshot: snapshot(),
+                        }],
+                        ..WorkspaceData::default()
+                    })
+                    .unwrap();
+                    let tab = if named {
+                        &mut data["workspaces"][0]["snapshot"]["tabs"][0]
+                    } else {
+                        &mut data["last_session"]["tabs"][0]
+                    };
+                    tab[field] = invalid.clone();
+                    let original = serde_json::to_vec_pretty(&data).unwrap();
+                    fs::write(directory.path(), &original).unwrap();
+                    assert!(load_from_path(&directory.path()).is_err());
+                    let mut update_ran = false;
+                    assert!(update_at_path(&directory.path(), |data| {
+                        update_ran = true;
+                        data.last_session = Some(snapshot());
+                        Ok(())
+                    })
+                    .is_err());
+                    assert!(!update_ran);
+                    assert_eq!(fs::read(directory.path()).unwrap(), original);
+                    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+                }
+            }
+        }
     }
 
     #[test]
