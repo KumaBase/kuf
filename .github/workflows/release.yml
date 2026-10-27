@@ -55,7 +55,50 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish
+      - name: Prepare notarization key
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "$APPLE_API_PRIVATE_KEY" ]; then
+            echo "Missing required notarization secret: APPLE_API_PRIVATE_KEY" >&2
+            exit 1
+          fi
+          umask 077
+          key_path="$RUNNER_TEMP/kuf-notary-key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build, verify and publish (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application: Kuma Base LLC (DL65SFF95N)'
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: kuf ${{ github.ref_name }}
+          releaseBody: |
+            Release notes and download information:
+            https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releases/${{ github.ref_name }}.md
+
+            Windows x64 / macOS Apple Silicon / Linux x64
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+          tauriScript: bash .github/scripts/tauri-release-macos.sh
+
+      - name: Remove notarization key from runner
+        if: always() && matrix.platform == 'macos-latest'
+        run: rm -f "$RUNNER_TEMP/kuf-notary-key.p8"
+
+      - name: Build and publish (Windows and Linux)
+        if: matrix.platform != 'macos-latest'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

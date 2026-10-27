@@ -55,6 +55,14 @@ npx tauri build
 | Windows  | `src-tauri/target/release/bundle/msi/kuf_0.4.0_x64_en-US.msi` |
 | Linux    | `src-tauri/target/release/bundle/deb/kuf_0.4.0_amd64.deb` |
 
+### macOS GitHub Releases
+
+Pushing a `v*` tag runs the release workflow. The macOS job signs the app and DMG with the Kuma Base Developer ID certificate, notarizes the app, and checks the signature and stapled ticket before publishing. A failed verification prevents the macOS assets from being uploaded; the Windows and Linux jobs run independently.
+
+The repository's GitHub Actions secrets must contain `APPLE_CERTIFICATE` (base64-encoded PKCS#12 identity), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY` (the App Store Connect API private key). These values must never be committed to the repository. The notarization key is written to a restricted temporary file on the macOS runner and removed after the job step.
+
+The regular CI workflow builds test binaries without release signing. The release workflow currently builds the architecture provided by `macos-latest`.
+
 ## Type Check
 
 ```bash
