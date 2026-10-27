@@ -1,0 +1,79 @@
+name: Verify macOS signing (temporary)
+
+on:
+  push:
+    branches:
+      - codex/github-macos-signing
+    paths:
+      - .github/workflows/verify-macos-signing.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kuf-macos-signing-validation
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Build, sign, notarize and verify macOS (no publishing)
+    if: github.repository == 'KumaBase/kuf' && github.ref == 'refs/heads/codex/github-macos-signing' && github.event_name == 'push'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Prepare notarization key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "$APPLE_API_PRIVATE_KEY" ]; then
+            echo "Missing required notarization secret: APPLE_API_PRIVATE_KEY" >&2
+            exit 1
+          fi
+          umask 077
+          key_path="$RUNNER_TEMP/kuf-notary-key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build and verify macOS without publishing
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0, same as Release
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application: Kuma Base LLC (DL65SFF95N)'
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        with:
+          # This pinned action skips ALL uploads without tagName or releaseId.
+          args: --bundles app,dmg
+          tauriScript: bash .github/scripts/tauri-release-macos.sh
+
+      - name: Remove notarization key from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kuf-notary-key.p8"
+
+      - name: Confirm notarization key removal
+        if: always()
+        run: test ! -e "$RUNNER_TEMP/kuf-notary-key.p8"
