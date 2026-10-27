@@ -773,26 +773,10 @@ async fn ssh_read_file_text(
 
 #[tauri::command]
 async fn ssh_accept_host(
-    host: String,
-    port: Option<u16>,
-    user: Option<String>,
-    _state: tauri::State<'_, ssh::connection::ConnectionManager>,
+    challenge_id: String,
+    state: tauri::State<'_, ssh::connection::ConnectionManager>,
 ) -> Result<(), String> {
-    let hosts = ssh::config::load_ssh_config()?;
-    let _host_config =
-        hosts
-            .iter()
-            .find(|h| h.alias == host)
-            .cloned()
-            .unwrap_or(ssh::config::SshHost {
-                alias: host.clone(),
-                host_name: Some(host.clone()),
-                user: user.clone(),
-                port: port.unwrap_or(22),
-                identity_file: None,
-            });
-    // With russh, host key is accepted during connect (TOFU handled by known_hosts)
-    Ok(())
+    state.accept_host(&challenge_id)
 }
 
 // --- Cross-filesystem transfer commands ---

@@ -29,10 +29,13 @@ export default function ConnectDialog(props: ConnectDialogProps) {
 
   // Host key confirmation (TOFU)
   const [hostKeyInfo, setHostKeyInfo] = createSignal<{
+    id: string;
     keyType: string;
     fingerprint: string;
     host: string;
     port: number;
+    originalHost: string;
+    originalPort: number;
     user: string | null;
     initialPath: string;
   } | null>(null);
@@ -97,17 +100,17 @@ export default function ConnectDialog(props: ConnectDialogProps) {
       const msg = String(e);
       // Check for unknown host key — offer TOFU acceptance
       if (msg.startsWith("[UNKNOWN_HOST_KEY]")) {
-        const parts = msg.slice("[UNKNOWN_HOST_KEY]".length).split("\n");
-        const keyType = parts[0] || "unknown";
-        const fingerprint = parts[1] || "";
-        const hostPort = (parts[2] || "").split(":");
-        const keyHost = hostPort[0] || host;
-        const keyPort = parseInt(hostPort[1]) || port;
-        setHostKeyInfo({ keyType, fingerprint, host: keyHost, port: keyPort, user, initialPath });
-        setConnecting(false);
-        return;
+        try {
+          const info = JSON.parse(msg.slice("[UNKNOWN_HOST_KEY]".length));
+          setHostKeyInfo({ ...info, originalHost: host, originalPort: port, user, initialPath });
+          setConnecting(false);
+          return;
+        } catch {
+          setError("Invalid host key confirmation response.");
+        }
+      } else {
+        setError(msg);
       }
-      setError(msg);
     }
     setConnecting(false);
   }
@@ -119,13 +122,11 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     setError("");
     try {
       await invoke("ssh_accept_host", {
-        host: info.host,
-        port: info.port,
-        user: info.user,
+        challengeId: info.id,
       });
       // Retry connection after accepting
       setHostKeyInfo(null);
-      await doConnect(info.host, info.user, info.port, info.initialPath);
+      await doConnect(info.originalHost, info.user, info.originalPort, info.initialPath);
     } catch (e) {
       setError(String(e));
       setConnecting(false);
@@ -328,7 +329,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
                 Fingerprint: {info().fingerprint}
               </div>
               <div class="connect-hostkey-warning">
-                Only accept if you trust this server.
+                Verify this fingerprint with the server administrator through a separate trusted channel before accepting.
               </div>
               <div class="connect-hostkey-actions">
                 <button class="dialog-btn" onClick={rejectHostKey}>

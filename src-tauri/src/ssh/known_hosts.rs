@@ -1,213 +1,202 @@
-use std::fs;
-use std::path::PathBuf;
+use hmac::{Hmac, Mac};
+use russh_keys::ssh_key::{
+    known_hosts::{HostPatterns, KnownHosts, Marker},
+    PublicKey,
+};
+use sha1::Sha1;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-/// Parsed entry from a known_hosts file (hashed or plain).
-struct KnownHost {
-    /// hostname or `[host]:port` pattern (plain-text entries only)
-    host_pattern: String,
-    /// key type marker, e.g. "ssh-ed25519", "ssh-rsa"
-    key_type: String,
-    /// base64-encoded public key data
-    key_data: Vec<u8>,
-}
-
-/// Parse `~/.ssh/known_hosts` and return entries that match `host:port`.
-fn load_known_hosts() -> Result<Vec<KnownHost>, String> {
-    let path = known_hosts_path()?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(&path).map_err(|e| format!("read known_hosts: {}", e))?;
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Format: [host_pattern,...] key_type base64_key
-        // or: @cert-authority host_pattern key_type base64_key
-        // or: @revoked host_pattern key_type base64_key
-        // Skip markers for now
-        let rest = if line.starts_with("@") {
-            // skip marker and the following token
-            match line.splitn(3, ' ').nth(2) {
-                Some(r) => r,
-                None => continue,
-            }
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    let p = pattern.as_bytes();
+    let s = value.as_bytes();
+    let (mut i, mut j, mut star, mut backtrack) = (0, 0, None, 0);
+    while j < s.len() {
+        if i < p.len() && (p[i] == b'?' || p[i].eq_ignore_ascii_case(&s[j])) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == b'*' {
+            star = Some(i);
+            i += 1;
+            backtrack = j;
+        } else if let Some(k) = star {
+            backtrack += 1;
+            j = backtrack;
+            i = k + 1;
         } else {
-            line
-        };
-        let parts: Vec<&str> = rest.splitn(3, ' ').collect();
-        if parts.len() < 3 {
-            continue;
+            return false;
         }
-        let host_pattern = parts[0].to_string();
-        let key_type = parts[1].to_string();
-        let key_data = match base64_decode(parts[2]) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        entries.push(KnownHost {
-            host_pattern,
-            key_type,
-            key_data,
-        });
     }
-    Ok(entries)
+    while i < p.len() && p[i] == b'*' {
+        i += 1;
+    }
+    i == p.len()
 }
 
-/// Check if a host pattern matches the given host and port.
-fn host_matches(pattern: &str, host: &str, port: u16) -> bool {
-    // Plain hostname or comma-separated list
-    // Pattern can be: "host", "[host]:port", or "host1,host2"
-    for pat in pattern.split(',') {
-        let pat = pat.trim();
-        if pat.starts_with('|') {
-            // Hashed entry — we can't match without hmac, skip
-            continue;
+fn host_matches(patterns: &HostPatterns, host: &str) -> Result<bool, String> {
+    match patterns {
+        HostPatterns::HashedName { salt, hash } => {
+            let mut mac = Hmac::<Sha1>::new_from_slice(salt)
+                .map_err(|_| "Invalid known_hosts hash".to_string())?;
+            mac.update(host.as_bytes());
+            Ok(mac.verify_slice(hash).is_ok())
         }
-        // Check [host]:port format
-        if pat.starts_with('[') && pat.contains("]:") {
-            // [host]:port
-            if let Some(bracket_end) = pat.find("]:") {
-                let pat_host = &pat[1..bracket_end];
-                let pat_port_str = &pat[bracket_end + 2..];
-                let pat_port: u16 = match pat_port_str.parse() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if pat_host == host && pat_port == port {
-                    return true;
+        HostPatterns::Patterns(patterns) => {
+            let mut matched = false;
+            for pattern in patterns {
+                if let Some(negative) = pattern.strip_prefix('!') {
+                    if pattern_matches(negative, host) {
+                        return Ok(false);
+                    }
+                } else if pattern_matches(pattern, host) {
+                    matched = true;
                 }
             }
-            continue;
-        }
-        // Plain hostname — only matches port 22 (OpenSSH convention:
-        // plain hostname in known_hosts implies port 22)
-        if pat == host && port == 22 {
-            return true;
+            Ok(matched)
         }
     }
-    false
 }
 
-/// Verify the server's host key against known_hosts.
-///
-/// Returns:
-/// - `Ok(true)` — key found and matches
-/// - `Ok(false)` — key NOT found in known_hosts (first connection)
-/// - `Err(...)` — key found but DOES NOT match (MITM or re-provisioned server)
-pub fn verify_host_key(
-    host: &str,
-    port: u16,
-    key_type: &str,
-    key_data: &[u8],
-) -> Result<bool, String> {
-    let entries = load_known_hosts()?;
-    for entry in &entries {
-        if host_matches(&entry.host_pattern, host, port) {
-            if entry.key_type == key_type && entry.key_data == key_data {
-                return Ok(true);
-            }
-            // Key type or data mismatch — potential MITM
-            return Err(format!(
-                "HOST KEY MISMATCH for {}:{} — possible man-in-the-middle attack! \
-                 Remove the old entry from ~/.ssh/known_hosts if this is expected.",
-                host, port
-            ));
-        }
-    }
-    // Not found — first connection
-    Ok(false)
-}
-
-/// Add a host key to known_hosts (TOFU — Trust On First Use).
-pub fn add_host_key(host: &str, port: u16, key_type: &str, key_data: &[u8]) -> Result<(), String> {
-    let path = known_hosts_path()?;
-    // Ensure ~/.ssh exists
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create ~/.ssh dir: {}", e))?;
-        }
-    }
-    let host_pattern = if port == 22 {
-        host.to_string()
-    } else {
-        format!("[{}]:{}", host, port)
-    };
-    let line = format!("{} {} {}\n", host_pattern, key_type, base64_encode(key_data));
-    fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
-        .map_err(|e| format!("write known_hosts: {}", e))
-}
-
-/// Get the path to ~/.ssh/known_hosts
 pub fn known_hosts_path() -> Result<PathBuf, String> {
     dirs::home_dir()
         .map(|p| p.join(".ssh").join("known_hosts"))
         .ok_or_else(|| "Cannot determine home directory".to_string())
 }
 
-// --- Minimal base64 (no external crate needed) ---
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let input = input.trim_end_matches('=');
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum: u64 = 0;
-    let mut bits = 0u32;
-    for ch in input.bytes() {
-        let val = if (b'A'..=b'Z').contains(&ch) {
-            ch - b'A'
-        } else if (b'a'..=b'z').contains(&ch) {
-            ch - b'a' + 26
-        } else if (b'0'..=b'9').contains(&ch) {
-            ch - b'0' + 52
-        } else if ch == b'+' {
-            62
-        } else if ch == b'/' {
-            63
-        } else {
-            return Err(format!("Invalid base64 char: {}", ch as char));
-        };
-        accum = (accum << 6) | val as u64;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-        }
+fn host_token(host: &str, port: u16) -> Result<String, String> {
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || ",*!?|[]".contains(c))
+    {
+        return Err("Invalid SSH host name".into());
     }
-    Ok(buf)
+    Ok(if port == 22 {
+        host.to_lowercase()
+    } else {
+        format!("[{}]:{}", host.to_lowercase(), port)
+    })
 }
 
-fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | input[i + 2] as u32;
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        out.push(TABLE[(n & 0x3F) as usize] as char);
-        i += 3;
+pub fn verify(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<bool, String> {
+    let token = host_token(host, port)?;
+    let content = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("Cannot read known_hosts: {e}")),
+    };
+    // The upstream parser accepts spaces as separators. Normalize tabs only in the fields.
+    let normalized = content
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut found = false;
+    let mut matched = false;
+    let mut ca_found = false;
+    for entry in KnownHosts::new(&normalized) {
+        let entry = entry.map_err(|e| format!("Cannot safely parse known_hosts: {e}"))?;
+        if !host_matches(entry.host_patterns(), &token)? {
+            continue;
+        }
+        match entry.marker() {
+            Some(Marker::Revoked) if entry.public_key().key_data() == key.key_data() => {
+                return Err("Server host key is revoked".into())
+            }
+            Some(Marker::Revoked) => {}
+            Some(Marker::CertAuthority) => {
+                ca_found = true;
+            }
+            None => {
+                found = true;
+                if entry.public_key().key_data() == key.key_data() {
+                    matched = true;
+                }
+            }
+        }
     }
-    if input.len() - i == 1 {
-        let n = (input[i] as u32) << 16;
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if input.len() - i == 2 {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        out.push('=');
+    if matched {
+        Ok(true)
+    } else if found {
+        Err(format!(
+            "HOST KEY MISMATCH for {host}:{port}; check ~/.ssh/known_hosts"
+        ))
+    } else if ca_found {
+        Err("Host certificate authorities are not supported by kuf".into())
+    } else {
+        Ok(false)
     }
-    out
+}
+
+pub(super) fn add_at(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<(), String> {
+    host_token(host, port)?;
+    if verify(path, host, port, key)? {
+        return Ok(());
+    }
+    russh_keys::known_hosts::learn_known_hosts_path(host, port, key, path)
+        .map_err(|e| format!("Cannot save host key: {e}"))?;
+    if !verify(path, host, port, key)? {
+        return Err("Cannot verify saved host key".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const A: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+    const B: &str = "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF";
+
+    #[test]
+    fn known_host_matching_and_rejection() {
+        let dir = std::env::temp_dir().join(format!("kuf-known-hosts-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        let a = russh_keys::parse_public_key_base64(A).unwrap();
+        let b = russh_keys::parse_public_key_base64(B).unwrap();
+        assert!(!verify(&path, "host.example", 22, &a).unwrap());
+        add_at(&path, "host.example", 22, &a).unwrap();
+        assert!(verify(&path, "host.example", 22, &a).unwrap());
+        assert!(verify(&path, "host.example", 22, &b).is_err());
+        assert!(add_at(&path, "host.example", 22, &b).is_err());
+        fs::write(
+            &path,
+            format!("host.example ssh-ed25519 {B}\n  host.example\tssh-ed25519  {A} comment\n"),
+        )
+        .unwrap();
+        assert!(verify(&path, "host.example", 22, &a).unwrap());
+        assert!(verify(&path, "host.example", 23, &a).is_ok_and(|v| !v));
+        fs::write(&path, format!("host.example ssh-ed25519 {B}\n")).unwrap();
+        assert!(verify(&path, "host.example", 22, &a).is_err());
+        fs::write(
+            &path,
+            format!("host.example ssh-ed25519 {A}\n@revoked host.example ssh-ed25519 {A}\n"),
+        )
+        .unwrap();
+        assert!(verify(&path, "host.example", 22, &a).is_err());
+        fs::write(
+            &path,
+            format!(
+                "|1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|nuuC5vEqXlEZ/8BXQR7m619W6Ak= ssh-ed25519 {B}\n"
+            ),
+        )
+        .unwrap();
+        assert!(verify(&path, "example.com", 22, &b).unwrap());
+        fs::write(&path, format!("*.example,!bad.example ssh-ed25519 {A}\n")).unwrap();
+        assert!(verify(&path, "ok.example", 22, &a).unwrap());
+        assert!(!verify(&path, "bad.example", 22, &a).unwrap());
+        fs::write(
+            &path,
+            format!("@cert-authority *.example ssh-ed25519 {B}\nhost.example ssh-ed25519 {A}\n"),
+        )
+        .unwrap();
+        assert!(verify(&path, "host.example", 22, &a).unwrap());
+        assert!(verify(&path, "other.example", 22, &a).is_err());
+        fs::write(&path, "invalid\n").unwrap();
+        assert!(verify(&path, "host.example", 22, &a).is_err());
+        assert!(verify(&path, "bad\nentry", 22, &a).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
