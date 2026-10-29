@@ -43,6 +43,8 @@ export default function Dialog(props: DialogProps) {
 
   function handleKeyDown(e: KeyboardEvent) {
     e.stopPropagation();
+    // Leave Enter/Space on buttons to the browser so Enter on Cancel cancels.
+    if (e.target instanceof HTMLButtonElement && (e.key === "Enter" || e.key === " ")) return;
     if (e.key === "Escape") {
       e.preventDefault();
       props.onCancel();

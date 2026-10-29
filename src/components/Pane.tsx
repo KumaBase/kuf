@@ -28,7 +28,10 @@ interface PaneProps {
   onClick?: (index: number, e: MouseEvent) => void;
   onDoubleClick?: (index: number) => void;
   onContextMenu?: (index: number, x: number, y: number) => void;
+  onPointerDown?: (index: number, event: PointerEvent) => void;
   onActivate?: () => void;
+  dropTarget?: { index: number | null } | null;
+  onBackgroundContextMenu?: (x: number, y: number) => void;
 }
 
 const Pane: Component<PaneProps> = (props) => {
@@ -40,6 +43,7 @@ const Pane: Component<PaneProps> = (props) => {
   return (
     <div
       class="pane"
+      data-pane-side={props.side}
       aria-busy={props.loading}
       classList={{ active: props.isActive }}
       onMouseDown={props.onActivate}
@@ -107,7 +111,11 @@ const Pane: Component<PaneProps> = (props) => {
       <Show when={props.filterQuery && filteredCount() === 0}>
         <div class="filter-empty" role="status">一致する項目がありません</div>
       </Show>
-      <div class="pane-body">
+      <div class="pane-body" classList={{ "drop-target": !!props.dropTarget && props.dropTarget.index === null }} onContextMenu={(e) => {
+        if ((e.target as HTMLElement).closest(".file-row")) return;
+        e.preventDefault();
+        props.onBackgroundContextMenu?.(e.clientX, e.clientY);
+      }}>
         <Show when={props.watchError && !props.loadError}>
           <div class="pane-load-error" role="status">この場所は自動更新できません。Ctrl+R で更新できます。</div>
         </Show>
@@ -123,6 +131,8 @@ const Pane: Component<PaneProps> = (props) => {
           onClick={props.onClick}
           onDoubleClick={props.onDoubleClick}
           onContextMenu={props.onContextMenu}
+          onPointerDown={props.onPointerDown}
+          dropTargetIndex={props.dropTarget?.index}
         />
       </div>
     </div>

@@ -19,6 +19,8 @@ interface FileListProps {
   onClick?: (index: number, e: MouseEvent) => void;
   onDoubleClick?: (index: number) => void;
   onContextMenu?: (index: number, x: number, y: number) => void;
+  onPointerDown?: (index: number, event: PointerEvent) => void;
+  dropTargetIndex?: number | null;
 }
 
 interface HighlightedNameProps {
@@ -127,12 +129,14 @@ export default function FileList(props: FileListProps) {
             return (
               <div
                 class="file-row"
+                data-file-index={index}
                 classList={{
                   "cursor-active":
                     index === props.cursorIndex && props.isActive,
                   "cursor-inactive":
                     index === props.cursorIndex && !props.isActive,
                   selected: selected().has(index),
+                  "drop-target": index === props.dropTargetIndex,
                 }}
                 style={{
                   position: "absolute",
@@ -141,6 +145,7 @@ export default function FileList(props: FileListProps) {
                   width: "100%",
                 }}
                 onClick={(e) => props.onClick?.(index, e)}
+                onPointerDown={(e) => props.onPointerDown?.(index, e)}
                 onDblClick={() => props.onDoubleClick?.(index)}
                 onContextMenu={(e) => {
                   e.preventDefault();

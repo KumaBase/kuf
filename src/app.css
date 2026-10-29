@@ -261,6 +261,26 @@ body,
   background: var(--bg-cursor-active);
 }
 
+.file-row.drop-target, .pane-body.drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--bg-cursor-active);
+}
+
+.drag-ghost {
+  position: fixed;
+  z-index: 1500;
+  pointer-events: none;
+  padding: 5px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 3px 10px #0006;
+}
+
+.drag-ghost span { color: var(--text-secondary); font-size: 0.85em; }
+
 .row-icon {
   width: 14px;
   flex-shrink: 0;
@@ -1196,15 +1216,6 @@ body,
 
 /* --- Context Menu --- */
 
-.context-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 998;
-}
-
 .context-menu {
   position: fixed;
   z-index: 999;
@@ -1212,12 +1223,20 @@ body,
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 0;
-  min-width: 240px;
+  width: min(260px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   font-size: var(--chrome-size);
 }
 
 .context-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-family: var(--font-ui);
   padding: 8px 18px;
   cursor: pointer;
   font-size: 1em;
@@ -1228,6 +1247,9 @@ body,
 .context-item:hover {
   background: var(--bg-cursor-active);
 }
+
+.context-item:disabled { color: var(--text-secondary); cursor: default; }
+.context-item:disabled:hover { background: transparent; }
 
 .context-separator {
   height: 1px;

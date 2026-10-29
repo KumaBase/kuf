@@ -25,6 +25,7 @@ import ExternalCommandsDialog from "./components/ExternalCommandsDialog";
 import type { ExternalCommandContext } from "./external-commands";
 import { compareFilesForSelection } from "./filer-selection";
 import { captureRenameRequest, type RenameRequestSnapshot } from "./batch-rename";
+import { captureDragSource, contextTargetIsCurrent, hasDuplicateDropNames, menuPosition, nativeDropPoint, toggleMouseSelection, type DragSource } from "./mouse";
 import {
   createTabState,
   keybinds,
@@ -143,7 +144,18 @@ function App() {
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
     y: number;
+    pane: PaneActions;
+    directory: string;
+    name: string | null;
+    selectedNames: string[];
   } | null>(null);
+  type DropTarget = { side: Side; pane: PaneActions; directory: string; index: number | null };
+  const [dropTarget, setDropTarget] = createSignal<DropTarget | null>(null);
+  const [dragging, setDragging] = createSignal<{ x: number; y: number; count: number; moving: boolean } | null>(null);
+  let contextMenuRef: HTMLDivElement | undefined;
+  let pointerDrag: { id: number; x: number; y: number; name: string; source: DragSource; pane: PaneActions; tabId: string; started: boolean; cancelled: boolean } | null = null;
+  let ignoreDragClick = false;
+  let dropTransferPending = false;
   const tabs = () => workspace.tabs().map((tab) => ({
     id: tab.id, left: tab.left.state, right: tab.right.state, activeSide: tab.activeSide(),
   }));
@@ -165,7 +177,7 @@ function App() {
 
   const visibleLocalPanes = () => [left(), right()].filter((pane) => pane.state.path && !isRemotePath(pane.state.path));
   const [watchErrors, setWatchErrors] = createSignal<Record<string, string>>({});
-  const autoRefresh = createAutoRefresh(visibleLocalPanes, () => loading() || restoring() || busy(), (path) => {
+  const autoRefresh = createAutoRefresh(visibleLocalPanes, () => loading() || restoring() || busy() || !!dragging(), (path) => {
     flashStatus(`一覧を自動更新できませんでした: ${path}`);
   });
   let watchGeneration = 0;
@@ -228,18 +240,129 @@ function App() {
 
   // --- Mouse callbacks ---
 
+  function targetAtPoint(x: number, y: number): DropTarget | null {
+    const element = document.elementFromPoint(x, y);
+    const body = element?.closest<HTMLElement>(".pane-body");
+    const paneElement = body?.closest<HTMLElement>("[data-pane-side]");
+    const side = paneElement?.dataset.paneSide;
+    if (!body || (side !== "left" && side !== "right")) return null;
+    const pane = side === "left" ? left() : right();
+    if (!pane.state.path || pane.loading() || pane.loadError()) return null;
+    const row = element?.closest<HTMLElement>(".file-row");
+    const index = row && body.contains(row) ? Number(row.dataset.fileIndex) : NaN;
+    const file = Number.isInteger(index) ? pane.state.files[index] : undefined;
+    if (file?.is_dir) {
+      return { side, pane, directory: file.name === ".." ? parentPath(pane.state.path) : joinPath(pane.state.path, file.name), index };
+    }
+    return { side, pane, directory: pane.state.path, index: null };
+  }
+
+  function setHoveredTarget(target: DropTarget | null) {
+    const previous = dropTarget();
+    if (previous?.pane === target?.pane && previous?.directory === target?.directory && previous?.index === target?.index) return;
+    setDropTarget(target);
+  }
+
+  function openContextMenu(pane: PaneActions, side: Side, index: number | null, x: number, y: number) {
+    if (busy() || loading() || restoring() || dialog() || hasDialogOverlay()) return;
+    setActiveSide(side);
+    pane.resetRangeSelection();
+    if (index !== null) {
+      if (!pane.state.files[index]) return;
+      if (!pane.state.selectedIndices.includes(index)) pane.clearSelection();
+      pane.setState("cursorIndex", index);
+    }
+    setContextMenu({ x, y, pane, directory: pane.state.path, name: index === null ? null : pane.state.files[index].name,
+      selectedNames: pane.state.selectedIndices.flatMap((i) => pane.state.files[i] ? [pane.state.files[i].name] : []) });
+  }
+
+  function fitContextMenu() {
+    const menu = contextMenu();
+    if (!menu || !contextMenuRef) return;
+    const bounds = contextMenuRef.getBoundingClientRect();
+    const position = menuPosition(menu.x, menu.y, bounds.width, bounds.height, window.innerWidth, window.innerHeight);
+    contextMenuRef.style.left = `${position.x}px`;
+    contextMenuRef.style.top = `${position.y}px`;
+  }
+  createEffect(() => { if (contextMenu()) requestAnimationFrame(fitContextMenu); });
+
+  function runContextCommand(command: Command, requiresTarget = false) {
+    const menu = contextMenu();
+    setContextMenu(null);
+    if (!menu) return;
+    const side = menu.pane === left() ? "left" : menu.pane === right() ? "right" : null;
+    if (!side || !contextTargetIsCurrent(menu.pane.state, menu, requiresTarget)) {
+      flashStatus("一覧が変わりました。対象を選び直してください");
+      return;
+    }
+    setActiveSide(side);
+    if (command === "paste" && menu.name !== null) {
+      const file = menu.pane.state.files[menu.pane.state.cursorIndex];
+      if (file?.is_dir) {
+        void handlePaste(file.name === ".." ? parentPath(menu.directory) : joinPath(menu.directory, file.name))
+          .catch((error) => flashStatus(`貼り付けできませんでした: ${error}`));
+        return;
+      }
+    }
+    void executeCommand(command);
+  }
+
+  function startPointerDrag(pane: PaneActions, side: Side, index: number, event: PointerEvent) {
+    if (event.button !== 0 || !event.isPrimary || event.ctrlKey || busy() || loading() || restoring() || dialog() || hasDialogOverlay()) return;
+    const source = captureDragSource(pane.state, side, index);
+    if (!source) return;
+    pointerDrag = { id: event.pointerId, x: event.clientX, y: event.clientY, name: pane.state.files[index].name,
+      source, pane, tabId: workspace.current().id, started: false, cancelled: false };
+    try { (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId); } catch { /* pointer events still work inside the window */ }
+  }
+
+  function movePointerDrag(event: PointerEvent) {
+    const drag = pointerDrag;
+    if (!drag || drag.cancelled || event.pointerId !== drag.id) return;
+    if (!drag.started && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+    if (workspace.current().id !== drag.tabId || drag.pane.state.path !== drag.source.directory) { cancelPointerDrag(); return; }
+    if (!drag.started) {
+      drag.started = true;
+      setActiveSide(drag.source.side);
+      if (!drag.pane.state.selectedIndices.some((i) => drag.pane.state.files[i]?.name === drag.name)) drag.pane.clearSelection();
+      drag.pane.setCursorToFile(drag.name);
+    }
+    event.preventDefault();
+    setDragging({ x: event.clientX, y: event.clientY, count: drag.source.paths.length, moving: event.shiftKey });
+    setHoveredTarget(targetAtPoint(event.clientX, event.clientY));
+  }
+
+  function cancelPointerDrag() {
+    pointerDrag = null;
+    setDragging(null);
+    setDropTarget(null);
+  }
+
+  function endPointerDrag(event: PointerEvent) {
+    const drag = pointerDrag;
+    if (!drag || event.pointerId !== drag.id) return;
+    const target = drag.started && !drag.cancelled ? targetAtPoint(event.clientX, event.clientY) : null;
+    if (drag.started || drag.cancelled) {
+      ignoreDragClick = true;
+      setTimeout(() => { ignoreDragClick = false; }, 0);
+    }
+    cancelPointerDrag();
+    if (!target || workspace.current().id !== drag.tabId || drag.pane.state.path !== drag.source.directory) return;
+    setActiveSide(target.side);
+    void transferDropped(drag.source.directory, drag.source.paths, target, event.shiftKey ? "move" : "copy");
+  }
+
   function paneCallbacks(pane: PaneActions, side: Side) {
     return {
       onClick: (index: number, e: MouseEvent) => {
+        if (ignoreDragClick) { ignoreDragClick = false; return; }
+        // macOS Control-click can emit a click after opening the context menu.
+        if (contextMenu()) return;
         setActiveSide(side);
         if (e.shiftKey) { pane.selectRangeTo(index); return; }
         pane.resetRangeSelection();
         if (e.ctrlKey || e.metaKey) {
-          const selected = [...pane.state.selectedIndices];
-          const pos = selected.indexOf(index);
-          if (pos >= 0) selected.splice(pos, 1);
-          else if (pane.state.files[index]?.name !== "..") selected.push(index);
-          pane.setState("selectedIndices", selected);
+          pane.setState("selectedIndices", toggleMouseSelection(pane.state, index));
         } else {
           pane.setState("selectedIndices", []);
         }
@@ -252,16 +375,10 @@ function App() {
         await executeCommand("enter");
       },
       onContextMenu: (index: number, x: number, y: number) => {
-        setActiveSide(side);
-        pane.resetRangeSelection();
-        if (!pane.state.selectedIndices.includes(index)) pane.clearSelection();
-        pane.setState("cursorIndex", index);
-        const menuW = 260;
-        const menuH = 420;
-        if (x + menuW > window.innerWidth) x = window.innerWidth - menuW;
-        if (y + menuH > window.innerHeight) y = window.innerHeight - menuH;
-        setContextMenu({ x, y });
+        openContextMenu(pane, side, index, x, y);
       },
+      onBackgroundContextMenu: (x: number, y: number) => openContextMenu(pane, side, null, x, y),
+      onPointerDown: (index: number, event: PointerEvent) => startPointerDrag(pane, side, index, event),
       onActivate: () => setActiveSide(side),
     };
   }
@@ -445,6 +562,43 @@ function App() {
   }
 
   onMount(() => {
+    const dismissContext = (event: MouseEvent) => {
+      if (contextMenu() && event.target instanceof Element && !event.target.closest(".context-menu")) setContextMenu(null);
+    };
+    document.addEventListener("mousedown", dismissContext, true);
+    window.addEventListener("pointermove", movePointerDrag);
+    window.addEventListener("pointerup", endPointerDrag);
+    window.addEventListener("pointercancel", cancelPointerDrag);
+    window.addEventListener("blur", cancelPointerDrag);
+    window.addEventListener("resize", fitContextMenu);
+    onCleanup(() => {
+      document.removeEventListener("mousedown", dismissContext, true);
+      window.removeEventListener("pointermove", movePointerDrag);
+      window.removeEventListener("pointerup", endPointerDrag);
+      window.removeEventListener("pointercancel", cancelPointerDrag);
+      window.removeEventListener("blur", cancelPointerDrag);
+      window.removeEventListener("resize", fitContextMenu);
+      cancelPointerDrag();
+    });
+    const nativeDropListener = (async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      return getCurrentWindow().onDragDropEvent(({ payload }) => {
+        if (payload.type === "leave") { setHoveredTarget(null); return; }
+        if (loading() || restoring() || busy() || dialog() || hasDialogOverlay() || dragging()) { setHoveredTarget(null); return; }
+        const isMac = /Mac/i.test(navigator.platform) || /Macintosh/i.test(navigator.userAgent);
+        const point = nativeDropPoint(payload.position, isMac, window.devicePixelRatio);
+        const target = targetAtPoint(point.x, point.y);
+        if (payload.type !== "drop") { setHoveredTarget(target); return; }
+        setHoveredTarget(null);
+        const paths = [...new Set(payload.paths)].filter((path) => /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(path) && !path.includes("\0"));
+        if (!target || !paths.length || paths.length !== new Set(payload.paths).size) return;
+        setContextMenu(null);
+        setActiveSide(target.side);
+        void transferDropped(parentPath(paths[0]), paths, target, "copy");
+      });
+    })();
+    nativeDropListener.catch((error) => console.error("Failed to enable file drop:", error));
+    onCleanup(() => { void nativeDropListener.then((unlisten) => unlisten()).catch(() => {}); });
     const progressListener = listen<{ id: string; completed: number; total: number }>(
       "file-operation-progress", ({ payload }) => {
         setOperation((current) => current?.id === payload.id ? { ...current, ...payload } : current);
@@ -753,6 +907,14 @@ function App() {
       );
       if (!overwrite) return;
     }
+    await runTransfer(op, sourceDir, paths, dest, overwrite, destNames, inactive);
+  }
+
+  async function runTransfer(op: "copy" | "move", sourceDir: string, paths: string[], dest: string, overwrite: boolean, destNames?: string[], destinationPane?: PaneActions, exclusive = false, overwriteNames: string[] = []) {
+    const srcRemote = isRemotePath(sourceDir);
+    const dstRemote = isRemotePath(dest);
+    const verb = op === "copy" ? "コピー" : "移動";
+    const locations = [...new Set([sourceDir, dest, ...paths.map(parentPath)])];
     const succeeded = await runOp(`${verb}しています…`, async (operationId) => {
       if (srcRemote && !dstRemote) {
         const srcParsed = parseRemotePath(sourceDir);
@@ -780,17 +942,42 @@ function App() {
           operationId,
         });
       } else {
-        await invoke(op === "copy" ? "copy_items" : "move_items", {
+        const strict = exclusive;
+        const command = strict ? (op === "copy" ? "copy_items_exclusive" : "move_items_exclusive") : (op === "copy" ? "copy_items" : "move_items");
+        await invoke(command, {
           sources: paths,
           dest,
-          overwrite,
-          destNames,
+          ...(strict ? { overwriteNames } : { overwrite, destNames }),
           operationId,
         });
       }
       flashStatus(`${paths.length} 件を${verb}しました`);
-    }, [sourceDir, dest], true);
-    if (succeeded && destNames?.[0] && inactive.state.path === dest) inactive.setCursorToFile(destNames[0]);
+    }, locations, true);
+    if (succeeded && destNames?.[0] && destinationPane?.state.path === dest) destinationPane.setCursorToFile(destNames[0]);
+  }
+
+  async function transferDropped(sourceDir: string, paths: string[], target: DropTarget, op: "copy" | "move") {
+    if (!paths.length || dropTransferPending || busy() || loading() || restoring() || dialog() || hasDialogOverlay()) return;
+    const dest = target.directory;
+    if (paths.some((path) => parentPath(path) === dest)) { flashStatus("同じフォルダにはドロップできません"); return; }
+    if (isRemotePath(sourceDir) || isRemotePath(dest)) { flashStatus("ドラッグでの転送はローカルが対象です。リモートとの転送はF5/F6を使ってください"); return; }
+    if (hasDuplicateDropNames(paths)) { flashStatus("同じ名前の項目を同じ場所へまとめてドロップできません"); return; }
+    const verb = op === "copy" ? "コピー" : "移動";
+    const names = paths.map(baseName);
+    const listed = names.slice(0, 8).join("\n") + (names.length > 8 ? `\n...ほか ${names.length - 8} 件` : "");
+    dropTransferPending = true;
+    try {
+      if (!await askConfirm(`${verb}の確認`, `${paths.length} 件を次へ${verb}します。\n${dest}\n\n${listed}`)) return;
+      const conflicts = await collectConflicts(paths, dest);
+      let overwrite = false;
+      if (conflicts.length) {
+        const shown = conflicts.slice(0, 8).join("\n") + (conflicts.length > 8 ? `\n...ほか ${conflicts.length - 8} 件` : "");
+        overwrite = await askConfirm("上書きしますか？", `同じ名前の項目が ${conflicts.length} 件あります。上書きしますか？\n\n${shown}`);
+        if (!overwrite) return;
+      }
+      await runTransfer(op, sourceDir, paths, dest, overwrite, undefined, target.pane, true, overwrite ? conflicts : []);
+    } catch (error) { flashStatus(`${verb}できませんでした: ${error}`); }
+    finally { dropTransferPending = false; }
   }
 
   function formatKey(e: KeyboardEvent): string {
@@ -1120,7 +1307,7 @@ function App() {
           if (paths.length === 0) break;
           setClipboard(active.state.path, paths, "copy");
           active.clearSelection();
-          flashStatus(`Copy: ${paths.length} item(s)`);
+          flashStatus(`${paths.length} 件をコピーしました（kuf内）`);
           break;
         }
         case "move": {
@@ -1128,7 +1315,7 @@ function App() {
           if (paths.length === 0) break;
           setClipboard(active.state.path, paths, "move");
           active.clearSelection();
-          flashStatus(`Move: ${paths.length} item(s)`);
+          flashStatus(`${paths.length} 件を切り取りました（kuf内）`);
           break;
         }
         case "copy_to_other":
@@ -1386,53 +1573,62 @@ function App() {
     } catch (e) { flashStatus(`操作エラー: ${e}`); }
   }
 
-  async function handlePaste() {
+  async function handlePaste(destination?: string) {
     const clip = getClipboard();
     if (!clip) return;
     const active = getActive();
-    if (clip.op === "move" && clip.sourcePath === active.state.path) {
-      flashStatus("Cannot move to same directory");
+    const dest = destination ?? active.state.path;
+    if (clip.files.some((path) => parentPath(path) === dest)) {
+      flashStatus("同じフォルダには貼り付けできません");
       return;
     }
-    if (isRemotePath(active.state.path) || clip.files.some((p) => isRemotePath(p))) {
+    if (isRemotePath(dest) || clip.files.some((p) => isRemotePath(p))) {
       setDialog({
         type: "message",
-        title: "Not supported",
-        message: "Clipboard paste currently works for local paths only. Use F5/F6 to transfer with the other pane.",
+        title: "未対応",
+        message: "貼り付けはローカルのファイルに対応しています。リモートとの転送は相手窓へのコピー・移動を使ってください。",
         onOk: () => setDialog(null),
         onCancel: () => setDialog(null),
       });
       return;
     }
-    const verb = clip.op === "copy" ? "Copy" : "Move";
-    const dest = active.state.path;
+    const verb = clip.op === "copy" ? "コピー" : "移動";
     const ok = await askConfirm(
-      "Paste",
-      `${verb} ${clip.files.length} item(s) to\n${dest}`
+      "貼り付けの確認",
+      `${clip.files.length} 件を次へ${verb}します。\n${dest}`
     );
     if (!ok) return;
     const conflicts = await collectConflicts(clip.files, dest);
-    let overwrite = true;
+    let overwrite = false;
     if (conflicts.length > 0) {
+      const shown = conflicts.slice(0, 8).join("\n") + (conflicts.length > 8 ? `\n...ほか ${conflicts.length - 8} 件` : "");
       overwrite = await askConfirm(
-        "Overwrite?",
-        `${conflicts.length} item(s) already exist. Overwrite?`
+        "上書きしますか？",
+        `同じ名前の項目が ${conflicts.length} 件あります。上書きしますか？\n\n${shown}`
       );
       if (!overwrite) return;
     }
-    await runOp(`${verb}ing...`, async (operationId) => {
-      await invoke(clip.op === "copy" ? "copy_items" : "move_items", {
+    await runOp(`${verb}しています…`, async (operationId) => {
+      const command = clip.op === "copy" ? "copy_items_exclusive" : "move_items_exclusive";
+      await invoke(command, {
         sources: clip.files,
         dest,
-        overwrite,
+        overwriteNames: overwrite ? conflicts : [],
         operationId,
       });
-      flashStatus(`${verb}d ${clip.files.length} item(s)`);
+      flashStatus(`${clip.files.length} 件を${verb}しました`);
       if (clip.op === "move" && getClipboard() === clip) clearClipboard();
     }, [clip.sourcePath, dest], true);
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    if (pointerDrag?.started && e.key === "Escape") {
+      e.preventDefault();
+      pointerDrag.cancelled = true;
+      setDragging(null);
+      setDropTarget(null);
+      return;
+    }
     if (e.defaultPrevented) return;
     if (e.target instanceof HTMLElement && e.target.closest("button") && (e.key === "Enter" || e.key === " ")) return;
     if (isTypingTarget(e.target)) return;
@@ -1531,6 +1727,7 @@ function App() {
             onFilterFocus={() => left().setFilterOpen(true)}
             onFilterCommit={() => left().setFilterOpen(false)}
             isActive={activeSide() === "left"}
+            dropTarget={dropTarget()?.side === "left" ? dropTarget() : null}
             {...paneCallbacks(left(), "left")}
           />
           <Pane
@@ -1552,9 +1749,13 @@ function App() {
             onFilterFocus={() => right().setFilterOpen(true)}
             onFilterCommit={() => right().setFilterOpen(false)}
             isActive={activeSide() === "right"}
+            dropTarget={dropTarget()?.side === "right" ? dropTarget() : null}
             {...paneCallbacks(right(), "right")}
           />
         </div>
+        <Show when={dragging()}>{(drag) => <div class="drag-ghost" style={{ left: `${drag().x + 14}px`, top: `${drag().y + 14}px` }}>
+          {drag().count} 件を{drag().moving ? "移動" : "コピー"} <span>（Shiftで移動）</span>
+        </div>}</Show>
         <Show when={operation()}>
           {(op) => (
             <div class="operation-bar" role="status" aria-live="polite">
@@ -1700,142 +1901,30 @@ function App() {
         />
       </Show>
       <Show when={contextMenu()}>
-        <div
-          class="context-overlay"
-          onClick={() => {
-            setContextMenu(null);
-            focusApp();
-          }}
-        />
-        <div
-          class="context-menu"
-          style={{
-            left: `${contextMenu()!.x}px`,
-            top: `${contextMenu()!.y}px`,
-          }}
-        >
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("enter");
-            }}
-          >
-            開く
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("preview");
-            }}
-          >
-            プレビュー
-          </div>
-          <div class="context-separator" />
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("copy");
-            }}
-          >
-            クリップボードへコピー
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("move");
-            }}
-          >
-            切り取り
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("delete");
-            }}
-          >
-            削除
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("rename");
-            }}
-          >
-            名前の変更
-          </div>
-          <div class="context-separator" />
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("new_folder");
-            }}
-          >
-            新しいフォルダ
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("new_file");
-            }}
-          >
-            新しいファイル
-          </div>
-          <div class="context-separator" />
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("copy_to_other");
-            }}
-          >
-            相手窓へコピー
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("copy_as");
-            }}
-          >
-            名前を付けてコピー...
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("move_to_other");
-            }}
-          >
-            相手窓へ移動
-          </div>
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              executeCommand("copy_path");
-            }}
-          >
-            パスをコピー
-          </div>
-          <div class="context-separator" />
-          <div
-            class="context-item"
-            onClick={() => {
-              setContextMenu(null);
-              setShowConnect(true);
-            }}
-          >
-            サーバーに接続...
-          </div>
-        </div>
+        {(menu) => <div ref={contextMenuRef} class="context-menu" role="menu" style={{ left: `${menu().x}px`, top: `${menu().y}px` }} onContextMenu={(event) => event.preventDefault()}>
+          <Show when={menu().name !== null}>
+            <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("enter", true)}>開く</button>
+            <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("preview", true)}>プレビュー</button>
+            <Show when={menu().name !== ".."}>
+              <div class="context-separator" />
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("copy", true)}>コピー（kuf内）</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("move", true)}>切り取り（kuf内）</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("delete", true)}>削除</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("rename", true)}>名前の変更</button>
+              <div class="context-separator" />
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("copy_to_other", true)}>相手窓へコピー</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("copy_as", true)}>名前を付けてコピー...</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("move_to_other", true)}>相手窓へ移動</button>
+              <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("copy_path", true)}>パスをコピー</button>
+            </Show>
+            <div class="context-separator" />
+          </Show>
+          <button type="button" role="menuitem" class="context-item" disabled={!getClipboard()} onClick={() => runContextCommand("paste", menu().name !== null)}>貼り付け（kuf内）</button>
+          <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("new_folder")}>新しいフォルダ</button>
+          <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("new_file")}>新しいファイル</button>
+          <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("refresh")}>最新の情報に更新</button>
+          <button type="button" role="menuitem" class="context-item" onClick={() => runContextCommand("select_all")}>すべて選択</button>
+        </div>}
       </Show>
     </div>
   );
