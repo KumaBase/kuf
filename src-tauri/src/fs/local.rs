@@ -278,6 +278,11 @@ pub(crate) mod rename_test_volume;
 
 // Never fall back to replacing rename: a destination may appear after preflight.
 pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    rename_no_replace_raw(source, destination)
+        .map_err(|error| format!("Rename without overwrite failed: {error}"))
+}
+
+fn rename_no_replace_raw(source: &Path, destination: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -286,21 +291,37 @@ pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> Result<(),
         let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
         unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(destination.as_ptr()), MOVE_FILE_FLAGS(0)) }
-            .map_err(|error| format!("Rename without overwrite failed: {error}"))
+            .map_err(|error| {
+                let code = error.code().0 as u32;
+                if code & 0xffff0000 == 0x80070000 {
+                    std::io::Error::from_raw_os_error((code & 0xffff) as i32)
+                } else {
+                    std::io::Error::other(error.to_string())
+                }
+            })
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
-        let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-        let destination = std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let destination = std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         #[cfg(target_os = "linux")]
         let result = unsafe { libc::renameat2(libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, destination.as_ptr(), libc::RENAME_NOREPLACE) };
         #[cfg(target_os = "macos")]
         let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-        if result == 0 { Ok(()) } else { Err(format!("Rename without overwrite failed: {}", std::io::Error::last_os_error())) }
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    { let _ = (source, destination); Err("Renaming without overwrite is unsupported on this platform".into()) }
+    { let _ = (source, destination); Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Renaming without overwrite is unsupported on this platform")) }
+}
+
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    { error.raw_os_error() == Some(17) } // ERROR_NOT_SAME_DEVICE
+    #[cfg(unix)]
+    { error.raw_os_error() == Some(libc::EXDEV) }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = error; false }
 }
 
 fn dest_name_for(
@@ -425,6 +446,99 @@ fn copy_entry(src: &Path, dest: &Path) -> Result<(), String> {
             )
         })
     }
+}
+
+// Used by mouse transfers after a no-conflict check. All destinations are
+// created exclusively: an entry appearing after that check must not be replaced.
+pub(crate) fn transfer_item_for_mouse(
+    src: &Path, dest_dir: &Path, overwrite_names: &[String], moving: bool,
+) -> Result<(), String> {
+    let name = src.file_name().ok_or_else(|| format!("Invalid path: {}", src.display()))?.to_string_lossy();
+    if overwrite_names.iter().any(|approved| approved == &name) {
+        let local = LocalFs;
+        if moving {
+            local.move_items(std::slice::from_ref(&src.to_path_buf()), dest_dir, true, None)
+        } else {
+            local.copy_items(std::slice::from_ref(&src.to_path_buf()), dest_dir, true, None)
+        }
+    } else if moving {
+        move_item_exclusive(src, dest_dir)
+    } else {
+        copy_item_exclusive(src, dest_dir)
+    }
+}
+
+pub(crate) fn copy_item_exclusive(src: &Path, dest_dir: &Path) -> Result<(), String> {
+    let name = src.file_name().ok_or_else(|| format!("Invalid path: {}", src.display()))?;
+    let dest = dest_dir.join(name);
+    if would_copy_into_self(src, &dest)? {
+        return Err(format!("Cannot copy '{}' into itself", src.display()));
+    }
+    copy_entry_exclusive(src, &dest).map_err(|error| {
+        format!("コピーを中止しました: {error}\n{} には途中のデータや他の操作で作成された項目がある場合があります。内容を確認してください。コピー元は削除していません。", dest.display())
+    })
+}
+
+pub(crate) fn move_item_exclusive(src: &Path, dest_dir: &Path) -> Result<(), String> {
+    move_item_exclusive_with(src, dest_dir, rename_no_replace_raw)
+}
+
+pub(crate) fn move_item_exclusive_with(
+    src: &Path, dest_dir: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let name = src.file_name().ok_or_else(|| format!("Invalid path: {}", src.display()))?;
+    let dest = dest_dir.join(name);
+    if would_copy_into_self(src, &dest)? {
+        return Err(format!("Cannot move '{}' into itself", src.display()));
+    }
+    if fs::symlink_metadata(&dest).is_ok() {
+        return Err(format!("転送先が既に存在します: {}。コピー元は削除していません。", dest.display()));
+    }
+    match rename(src, &dest) {
+        Ok(()) => return Ok(()),
+        Err(error) if is_cross_device_error(&error) => (),
+        Err(error) => return Err(format!("移動を中止しました: {error}\nコピー元は削除していません。")),
+    }
+    // Cross-volume moves need a copy first. Exclusive creation prevents an
+    // entry created during the move from being overwritten.
+    copy_entry_exclusive(src, &dest).map_err(|error| {
+        format!("移動を中止しました: {error}\n{} には途中のデータや他の操作で作成された項目がある場合があります。内容を確認してください。コピー元は削除していません。", dest.display())
+    })?;
+    remove_entry(src).map_err(|error| format!("コピー後に移動元を削除できませんでした: {error}\nコピー先: {}", dest.display()))
+}
+
+fn copy_entry_exclusive(src: &Path, dest: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(src).map_err(|error| format!("{}: {error}", src.display()))?;
+    if is_symlink_meta(&meta) {
+        let target = fs::read_link(src).map_err(|error| format!("{}: {error}", src.display()))?;
+        // Creating a symlink fails if any destination entry already exists.
+        #[cfg(windows)]
+        if src.is_dir() {
+            return std::os::windows::fs::symlink_dir(&target, dest).map_err(|error| format!("{}: {error}", dest.display()));
+        } else {
+            return std::os::windows::fs::symlink_file(&target, dest).map_err(|error| format!("{}: {error}", dest.display()));
+        }
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(&target, dest).map_err(|error| format!("{}: {error}", dest.display()));
+        #[cfg(not(any(unix, windows)))]
+        return Err("シンボリックリンクのコピーはこの環境では未対応です".into());
+    }
+    if meta.is_dir() {
+        fs::create_dir(dest).map_err(|error| format!("{}: {error}", dest.display()))?;
+        for entry in fs::read_dir(src).map_err(|error| format!("{}: {error}", src.display()))? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            copy_entry_exclusive(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if !meta.is_file() { return Err(format!("通常ファイル以外はコピーできません: {}", src.display())); }
+    let mut input = fs::File::open(src).map_err(|error| format!("{}: {error}", src.display()))?;
+    let mut output = fs::OpenOptions::new().write(true).create_new(true).open(dest)
+        .map_err(|error| format!("{}: {error}", dest.display()))?;
+    std::io::copy(&mut input, &mut output).map_err(|error| format!("{}: {error}", dest.display()))?;
+    output.set_permissions(meta.permissions()).map_err(|error| format!("{}: {error}", dest.display()))?;
+    Ok(())
 }
 
 fn remove_entry(path: &Path) -> Result<(), String> {

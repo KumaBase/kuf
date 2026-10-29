@@ -2,7 +2,7 @@
 
 Dual-pane file manager built with Tauri 2.0 + SolidJS.
 
-![version](https://img.shields.io/badge/version-0.4.1-blue)
+![version](https://img.shields.io/badge/version-0.4.2-blue)
 
 ## Requirements
 
@@ -52,8 +52,8 @@ npx tauri build
 | Platform | Output |
 |----------|--------|
 | macOS    | `src-tauri/target/release/bundle/macos/kuf.app` |
-| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.4.1_x64_en-US.msi` |
-| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.4.1_amd64.deb` |
+| Windows  | `src-tauri/target/release/bundle/msi/kuf_0.4.2_x64_en-US.msi` |
+| Linux    | `src-tauri/target/release/bundle/deb/kuf_0.4.2_amd64.deb` |
 
 ### macOS GitHub Releases
 

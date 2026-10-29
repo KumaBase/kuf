@@ -189,6 +189,10 @@ function isWindowsLocalPath(path: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:$/.test(path) || path.startsWith("\\\\");
 }
 
+function usesWindowsSeparators(path: string): boolean {
+  return isWindowsLocalPath(path) || (!path.startsWith("/") && path.includes("\\"));
+}
+
 export function joinPath(base: string, name: string): string {
   if (isRemotePath(base)) {
     const parsed = parseRemotePath(base);
@@ -198,7 +202,7 @@ export function joinPath(base: string, name: string): string {
       : parsed.remotePath + "/" + name;
     return buildRemotePath(parsed.host, parsed.user, parsed.port, newPath);
   }
-  if (isWindowsLocalPath(base) || base.includes("\\")) {
+  if (usesWindowsSeparators(base)) {
     const trimmed = base.replace(/[\\/]+$/, "");
     return `${trimmed}\\${name}`;
   }
@@ -216,7 +220,7 @@ export function parentPath(path: string): string {
     const newRemote = lastSlash <= 0 ? "/" : normalized.substring(0, lastSlash);
     return buildRemotePath(parsed.host, parsed.user, parsed.port, newRemote);
   }
-  if (isWindowsLocalPath(path) || path.includes("\\")) {
+  if (usesWindowsSeparators(path)) {
     const normalized = path.replace(/\//g, "\\").replace(/\\+$/, "");
     if (/^[A-Za-z]:$/.test(normalized)) return normalized + "\\";
     const lastSlash = normalized.lastIndexOf("\\");
@@ -244,7 +248,7 @@ export function rootPath(path: string): string {
     if (!parsed) return path;
     return buildRemotePath(parsed.host, parsed.user, parsed.port, "/");
   }
-  if (isWindowsLocalPath(path) || path.includes("\\")) {
+  if (usesWindowsSeparators(path)) {
     const normalized = path.replace(/\//g, "\\");
     if (normalized.startsWith("\\\\")) {
       const parts = normalized.split("\\").filter(Boolean);
@@ -264,8 +268,9 @@ export function baseName(path: string): string {
     const lastSlash = remote.lastIndexOf("/");
     return lastSlash >= 0 ? remote.substring(lastSlash + 1) : remote;
   }
-  const normalized = path.replace(/[\\/]+$/, "");
-  const lastSlash = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  const windows = usesWindowsSeparators(path);
+  const normalized = windows ? path.replace(/[\\/]+$/, "") : path.replace(/\/+$/, "");
+  const lastSlash = windows ? Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\")) : normalized.lastIndexOf("/");
   return lastSlash >= 0 ? normalized.substring(lastSlash + 1) : normalized;
 }
 

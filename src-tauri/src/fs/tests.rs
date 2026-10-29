@@ -388,6 +388,144 @@ fn directory_merge_refuses_a_nested_hard_link_to_the_source_file() {
 }
 
 #[test]
+fn exclusive_transfers_preserve_existing_items_and_copy_directories() {
+    let root = Fixture::new();
+    let src = root.path().join("source");
+    let dest = root.path().join("destination");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(src.join("one.txt"), b"source").unwrap();
+    std::fs::write(dest.join("one.txt"), b"existing").unwrap();
+    assert!(super::local::copy_item_exclusive(&src.join("one.txt"), &dest).is_err());
+    assert!(super::local::move_item_exclusive(&src.join("one.txt"), &dest).is_err());
+    assert_eq!(std::fs::read(src.join("one.txt")).unwrap(), b"source");
+    assert_eq!(std::fs::read(dest.join("one.txt")).unwrap(), b"existing");
+    std::fs::create_dir(src.join("folder")).unwrap();
+    std::fs::write(src.join("folder/inside.txt"), b"nested").unwrap();
+    super::local::copy_item_exclusive(&src.join("folder"), &dest).unwrap();
+    assert_eq!(std::fs::read(dest.join("folder/inside.txt")).unwrap(), b"nested");
+    assert!(super::local::copy_item_exclusive(&src.join("folder"), &src.join("folder")).is_err());
+    std::fs::write(src.join("move.txt"), b"move").unwrap();
+    super::local::move_item_exclusive(&src.join("move.txt"), &dest).unwrap();
+    assert!(!src.join("move.txt").exists());
+    assert_eq!(std::fs::read(dest.join("move.txt")).unwrap(), b"move");
+}
+
+#[test]
+fn mouse_transfer_only_overwrites_names_explicitly_approved() {
+    let root = Fixture::new();
+    let src = root.path().join("source");
+    let dest = root.path().join("destination");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    for name in ["approved.txt", "new-conflict.txt"] {
+        std::fs::write(src.join(name), b"source").unwrap();
+        std::fs::write(dest.join(name), b"existing").unwrap();
+    }
+    let approved = vec!["approved.txt".to_string()];
+    super::local::transfer_item_for_mouse(&src.join("approved.txt"), &dest, &approved, false).unwrap();
+    assert_eq!(std::fs::read(dest.join("approved.txt")).unwrap(), b"source");
+    for moving in [false, true] {
+        assert!(super::local::transfer_item_for_mouse(&src.join("new-conflict.txt"), &dest, &approved, moving).is_err());
+        assert_eq!(std::fs::read(dest.join("new-conflict.txt")).unwrap(), b"existing");
+        assert_eq!(std::fs::read(src.join("new-conflict.txt")).unwrap(), b"source");
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn exclusive_move_copies_only_for_cross_device_errors() {
+    let root = Fixture::new();
+    let src = root.path().join("source");
+    let dest = root.path().join("destination");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(src.join("move.txt"), b"content").unwrap();
+    let failed = super::local::move_item_exclusive_with(&src.join("move.txt"), &dest, |_, _| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    });
+    assert!(failed.is_err());
+    assert!(!dest.join("move.txt").exists());
+    assert_eq!(std::fs::read(src.join("move.txt")).unwrap(), b"content");
+    #[cfg(windows)]
+    let cross_device = 17; // ERROR_NOT_SAME_DEVICE
+    #[cfg(unix)]
+    let cross_device = libc::EXDEV;
+    super::local::move_item_exclusive_with(&src.join("move.txt"), &dest, |_, _| {
+        Err(std::io::Error::from_raw_os_error(cross_device))
+    }).unwrap();
+    assert!(!src.join("move.txt").exists());
+    assert_eq!(std::fs::read(dest.join("move.txt")).unwrap(), b"content");
+}
+
+#[test]
+fn concurrent_exclusive_copies_never_replace_each_other() {
+    use std::sync::{Arc, Barrier};
+    let root = Fixture::new();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    let dest = root.path().join("destination");
+    for dir in [&first, &second, &dest] { std::fs::create_dir(dir).unwrap(); }
+    std::fs::write(first.join("same.txt"), b"first").unwrap();
+    std::fs::write(second.join("same.txt"), b"second").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = [first.join("same.txt"), second.join("same.txt")].into_iter().map(|src| {
+        let dest = dest.clone(); let barrier = barrier.clone();
+        std::thread::spawn(move || { barrier.wait(); super::local::copy_item_exclusive(&src, &dest) })
+    }).collect();
+    let succeeded = workers.into_iter().map(|worker| worker.join().unwrap().is_ok()).filter(|ok| *ok).count();
+    assert_eq!(succeeded, 1);
+    assert!([b"first".as_slice(), b"second".as_slice()].contains(&std::fs::read(dest.join("same.txt")).unwrap().as_slice()));
+    assert_eq!(std::fs::read(first.join("same.txt")).unwrap(), b"first");
+    assert_eq!(std::fs::read(second.join("same.txt")).unwrap(), b"second");
+}
+
+#[test]
+fn concurrent_exclusive_moves_keep_the_losing_source() {
+    use std::sync::{Arc, Barrier};
+    let root = Fixture::new();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    let dest = root.path().join("destination");
+    for dir in [&first, &second, &dest] { std::fs::create_dir(dir).unwrap(); }
+    std::fs::write(first.join("same.txt"), b"first").unwrap();
+    std::fs::write(second.join("same.txt"), b"second").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = [first.join("same.txt"), second.join("same.txt")].into_iter().map(|src| {
+        let dest = dest.clone(); let barrier = barrier.clone();
+        std::thread::spawn(move || { barrier.wait(); super::local::move_item_exclusive(&src, &dest) })
+    }).collect();
+    let succeeded = workers.into_iter().map(|worker| worker.join().unwrap().is_ok()).filter(|ok| *ok).count();
+    assert_eq!(succeeded, 1);
+    let result = std::fs::read(dest.join("same.txt")).unwrap();
+    if result == b"first" {
+        assert!(!first.join("same.txt").exists());
+        assert_eq!(std::fs::read(second.join("same.txt")).unwrap(), b"second");
+    } else {
+        assert_eq!(result, b"second");
+        assert_eq!(std::fs::read(first.join("same.txt")).unwrap(), b"first");
+        assert!(!second.join("same.txt").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exclusive_transfers_do_not_follow_or_replace_dangling_destinations() {
+    let root = Fixture::new();
+    let src = root.path().join("source");
+    let dest = root.path().join("destination");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(src.join("one.txt"), b"original").unwrap();
+    std::os::unix::fs::symlink("missing-target", dest.join("one.txt")).unwrap();
+    assert!(super::local::copy_item_exclusive(&src.join("one.txt"), &dest).is_err());
+    assert!(super::local::move_item_exclusive(&src.join("one.txt"), &dest).is_err());
+    assert_eq!(std::fs::read(src.join("one.txt")).unwrap(), b"original");
+    assert_eq!(std::fs::read_link(dest.join("one.txt")).unwrap(), PathBuf::from("missing-target"));
+    assert!(!dest.join("missing-target").exists());
+}
+
+#[test]
 #[ignore = "Creates 10000 fixture files; run explicitly for performance measurement"]
 fn benchmark_local_filesystem() {
     let root = Fixture::new();

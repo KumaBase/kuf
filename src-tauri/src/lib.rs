@@ -275,6 +275,36 @@ async fn move_items(
 }
 
 #[tauri::command]
+async fn copy_items_exclusive(
+    sources: Vec<String>, dest: String, overwrite_names: Option<Vec<String>>, operation_id: Option<String>,
+    operations: tauri::State<'_, operation::Operations>, app: tauri::AppHandle,
+) -> Result<(), String> {
+    let op = operations.get(operation_id.as_deref())?;
+    background::run(move || {
+        let sources: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+        operation::process_items(&sources, op.as_ref(), &app, |src, index| {
+            fs::local::transfer_item_for_mouse(src, Path::new(&dest), overwrite_names.as_deref().unwrap_or_default(), false)
+                .map_err(|error| format!("{index} 件完了。\n{error}"))
+        })
+    }).await
+}
+
+#[tauri::command]
+async fn move_items_exclusive(
+    sources: Vec<String>, dest: String, overwrite_names: Option<Vec<String>>, operation_id: Option<String>,
+    operations: tauri::State<'_, operation::Operations>, app: tauri::AppHandle,
+) -> Result<(), String> {
+    let op = operations.get(operation_id.as_deref())?;
+    background::run(move || {
+        let sources: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+        operation::process_items(&sources, op.as_ref(), &app, |src, index| {
+            fs::local::transfer_item_for_mouse(src, Path::new(&dest), overwrite_names.as_deref().unwrap_or_default(), true)
+                .map_err(|error| format!("{index} 件完了。\n{error}"))
+        })
+    }).await
+}
+
+#[tauri::command]
 async fn check_conflicts(
     sources: Vec<String>,
     dest: String,
@@ -1028,8 +1058,10 @@ pub fn run() {
             home_dir,
             read_dir,
             copy_items,
+            copy_items_exclusive,
             check_conflicts,
             move_items,
+            move_items_exclusive,
             delete_items,
             rename_item,
             create_dir,
